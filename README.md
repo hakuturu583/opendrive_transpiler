@@ -202,7 +202,7 @@ things and the difference matters when planning around it.
 | Geocentric `<geoReference>` | `LL2ODR-I906` | **No equivalent exists.** Geocentric coordinates are earth-centred XYZ; there is no planar PROJ string that means the same thing. |
 | `<spiral>` fitting | — | Not done. Fitting a clothoid to a polyline is a genuinely harder problem than arcs or cubics; `--fit=arc` and `--fit=parampoly3` cover the continuity case. |
 | `load()` / `loadRobust()` from an `.osm` | `LL2ODR-E402` | Not done, and it would change what this tool is: it converts maps a script *builds*, so reading one would mean adding an OSM parser and full inverse projections. |
-| `class`, `match`, generators, real exception unwinding, seeded `random` | `LL2ODR-E201` / `E202` | Not done. Map-building scripts do not use these; each is reported with its source location rather than silently mishandled. |
+| Third-party modules other than `math`, including `random` | — | **Out of scope by choice.** Evaluating them means running them, which the design forbids; their calls yield `Unknown` and any branch on one is reported (`LL2ODR-W601`). |
 
 ### Python constructs the symbolic executor handles
 
@@ -221,20 +221,35 @@ things and the difference matters when planning around it.
 - [x] Arithmetic, comparison, boolean and unary operators
 - [x] Walrus operator (`:=`)
 - [x] `with` (body executed; the context manager itself cannot affect the map)
-- [x] `try` / `except` / `else` / `finally`
 - [x] `global` / `nonlocal`, `assert` (no-op), `pass`
 - [x] Every lanelet2 import form (see below), plus `import math`
 - [x] Builtins: `abs all any bool dict divmod enumerate float int len list max min
       print range repr reversed round set sorted str sum tuple zip`
 - [x] Three-valued conditions: an unresolvable `if` takes one branch and says so
       (`LL2ODR-W601`), configurable with `--on-unknown-branch`
-- [ ] `class` definitions — `LL2ODR-E201`
-- [ ] Decorators — reported, then the undecorated function is used (`LL2ODR-E201`)
-- [ ] `match` statements — `LL2ODR-E201`
-- [ ] Generators (`yield`), `async`/`await` — `LL2ODR-E202`
-- [ ] Exception *semantics* (a raised exception aborts rather than unwinding)
-- [ ] Third-party modules other than `math` (calls yield `Unknown`)
-- [ ] `random` (currently `Unknown`; a seeded mode is possible but seed-dependent)
+- [x] `class` definitions — attributes, methods, inheritance, `super()` in both the
+      zero-argument and `super(Cls, self)` forms, and `isinstance` against them.
+      No metaclasses, descriptors or MRO linearisation: bases are searched
+      depth-first, which is the same answer for any hierarchy without diamonds
+- [x] Decorators, including stacked ones, applied innermost-first
+- [x] `match` — literal, capture, wildcard, `|`, sequence (with `*rest`), mapping
+      and class patterns, plus `if` guards. Class patterns match by keyword
+      (`Straight(length=n)`); the positional form needs `__match_args__`, which
+      nothing here defines, so such a case is skipped and reported
+- [x] Generators — `yield`, `yield from`, consumed by `for`, `list`, `sum`, `max`.
+      Materialised eagerly rather than lazily, since every loop here is bounded
+      anyway; the one thing it cannot model is a value *sent* into a `yield`,
+      which therefore evaluates to `None`
+- [x] Exception semantics — `raise` (including bare re-raise), matching by class
+      and by built-in base class, script-defined exception classes with `args`,
+      handler order, `else`, `finally`, and unwinding out through calls. An
+      exception nothing catches is reported (`LL2ODR-W607`) rather than ignored
+- [ ] `await`, `async for`, `async with` — `LL2ODR-E202` / `E201`. There is
+      nothing to interleave with, so a coroutine has no meaning here. An
+      `async def` runs as a plain function and calling it yields its result
+      rather than a coroutine, which is the same answer for map-building code
+- [ ] Third-party modules other than `math`, `random` included — see the table
+      above
 
 ### lanelet2 API surface
 

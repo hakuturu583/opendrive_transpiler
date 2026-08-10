@@ -328,13 +328,6 @@ def test_recursion_limit_is_enforced():
     assert "LL2ODR-E605" in codes(bag)
 
 
-def test_class_definitions_are_refused_clearly():
-    with pytest.raises(TranspileError) as excinfo:
-        run("class Foo:\n    pass\n")
-    assert excinfo.value.diagnostic.code == "LL2ODR-E201"
-    assert excinfo.value.diagnostic.span.line > 0
-
-
 def test_undefined_name_reports_its_location():
     with pytest.raises(TranspileError) as excinfo:
         run("x = definitely_not_defined\n")
@@ -554,3 +547,284 @@ def test_vector2d_refuses_construction_as_lanelet2_does():
     with pytest.raises(TranspileError) as excinfo:
         run("from lanelet2.core import Vector2d\nv = Vector2d()\n")
     assert excinfo.value.diagnostic.code == "LL2ODR-E303"
+
+
+# --------------------------------------------------------------------------
+# Constructs the executor evaluates
+# --------------------------------------------------------------------------
+# The input script is never executed -- these are evaluated symbolically, and
+# each case here backs a ticked row in the README's construct checklist.
+
+
+def test_a_class_gathers_state_and_reads_it_back():
+    value, bag = evaluate(
+        "class Road:\n"
+        "    width = 3.5\n"
+        "    def __init__(self, length):\n"
+        "        self.length = length\n"
+        "    def area(self):\n"
+        "        return self.length * self.width\n"
+        "probe = Road(40.0).area()\n",
+        "probe",
+    )
+    assert value == 140.0
+    assert not codes(bag)
+
+
+def test_a_subclass_overrides_and_calls_back_through_super():
+    value, _ = evaluate(
+        "class Base:\n"
+        "    def length(self):\n"
+        "        return 20.0\n"
+        "class Long(Base):\n"
+        "    def length(self):\n"
+        "        return super().length() * 2\n"
+        "probe = [Long().length(), Base().length()]\n",
+        "probe",
+    )
+    assert value == [40.0, 20.0]
+
+
+def test_the_explicit_two_argument_super_works_too():
+    value, _ = evaluate(
+        "class Base:\n"
+        "    def name(self):\n"
+        "        return 'base'\n"
+        "class Sub(Base):\n"
+        "    def name(self):\n"
+        "        return super(Sub, self).name() + '+sub'\n"
+        "probe = Sub().name()\n",
+        "probe",
+    )
+    assert value == "base+sub"
+
+
+def test_isinstance_sees_script_defined_classes():
+    value, _ = evaluate(
+        "class Base:\n    pass\n"
+        "class Sub(Base):\n    pass\n"
+        "probe = [isinstance(Sub(), Sub), isinstance(Sub(), Base), isinstance(Base(), Sub)]\n",
+        "probe",
+    )
+    assert value == [True, True, False]
+
+
+def test_a_decorator_wraps_the_function_it_decorates():
+    value, _ = evaluate(
+        "def double(fn):\n"
+        "    def wrapper(x):\n"
+        "        return fn(x) * 2\n"
+        "    return wrapper\n"
+        "@double\n"
+        "def identity(x):\n"
+        "    return x\n"
+        "probe = identity(20.0)\n",
+        "probe",
+    )
+    assert value == 40.0
+
+
+def test_stacked_decorators_apply_innermost_first():
+    value, _ = evaluate(
+        "def add(fn):\n"
+        "    return lambda x: fn(x) + 1\n"
+        "def times(fn):\n"
+        "    return lambda x: fn(x) * 10\n"
+        "@add\n"
+        "@times\n"
+        "def f(x):\n"
+        "    return x\n"
+        "probe = f(2)\n",
+        "probe",
+    )
+    # `times` is nearest the def, so it runs first: 2 * 10, then + 1.
+    assert value == 21
+
+
+def test_match_selects_by_literal_and_falls_through_to_the_wildcard():
+    value, _ = evaluate(
+        "def width(kind):\n"
+        "    match kind:\n"
+        "        case 'street':\n"
+        "            return 3.0\n"
+        "        case 'highway':\n"
+        "            return 3.75\n"
+        "        case _:\n"
+        "            return 2.5\n"
+        "probe = [width('street'), width('highway'), width('track')]\n",
+        "probe",
+    )
+    assert value == [3.0, 3.75, 2.5]
+
+
+def test_match_destructures_sequences_and_honours_guards():
+    value, _ = evaluate(
+        "def classify(spec):\n"
+        "    match spec:\n"
+        "        case [name, length] if length > 10:\n"
+        "            return name + '-long'\n"
+        "        case [name, _]:\n"
+        "            return name + '-short'\n"
+        "        case _:\n"
+        "            return 'unknown'\n"
+        "probe = [classify(['a', 40]), classify(['b', 4]), classify('x')]\n",
+        "probe",
+    )
+    assert value == ["a-long", "b-short", "unknown"]
+
+
+def test_match_destructures_mappings_and_classes():
+    value, _ = evaluate(
+        "class Straight:\n"
+        "    def __init__(self, length):\n"
+        "        self.length = length\n"
+        "def describe(item):\n"
+        "    match item:\n"
+        "        case {'length': length}:\n"
+        "            return length\n"
+        "        case Straight(length=length):\n"
+        "            return length\n"
+        "        case _:\n"
+        "            return 0.0\n"
+        "probe = [describe({'length': 12.0}), describe(Straight(9.0)), describe(3)]\n",
+        "probe",
+    )
+    assert value == [12.0, 9.0, 0.0]
+
+
+def test_match_binds_or_patterns_and_captures():
+    value, _ = evaluate(
+        "def side(kind):\n"
+        "    match kind:\n"
+        "        case 'left' | 'port':\n"
+        "            return -1\n"
+        "        case other:\n"
+        "            return other\n"
+        "probe = [side('port'), side('left'), side(7)]\n",
+        "probe",
+    )
+    assert value == [-1, -1, 7]
+
+
+def test_a_generator_is_materialised_into_its_values():
+    value, _ = evaluate(
+        "def lengths():\n"
+        "    for i in range(3):\n"
+        "        yield i * 10.0\n"
+        "probe = [list(lengths()), max(lengths()), sum(lengths())]\n",
+        "probe",
+    )
+    assert value == [[0.0, 10.0, 20.0], 20.0, 30.0]
+
+
+def test_yield_from_flattens_a_delegated_generator():
+    value, _ = evaluate(
+        "def inner():\n"
+        "    yield 1\n"
+        "    yield 2\n"
+        "def outer():\n"
+        "    yield 0\n"
+        "    yield from inner()\n"
+        "    yield 3\n"
+        "probe = list(outer())\n",
+        "probe",
+    )
+    assert value == [0, 1, 2, 3]
+
+
+def test_a_generator_can_be_iterated_by_a_for_loop():
+    value, _ = evaluate(
+        "def points():\n"
+        "    yield 0.0\n"
+        "    yield 5.0\n"
+        "total = 0.0\n"
+        "for p in points():\n"
+        "    total = total + p\n"
+        "probe = total\n",
+        "probe",
+    )
+    assert value == 5.0
+
+
+def test_a_raise_unwinds_to_the_matching_handler():
+    value, bag = evaluate(
+        "def length_of(kind):\n"
+        "    if kind != 'highway':\n"
+        "        raise ValueError('unknown kind')\n"
+        "    return 40.0\n"
+        "try:\n"
+        "    probe = length_of('street')\n"
+        "except ValueError:\n"
+        "    probe = 0.0\n",
+        "probe",
+    )
+    assert value == 0.0
+    assert not codes(bag)
+
+
+def test_handlers_are_tried_in_order_and_else_runs_when_nothing_raised():
+    value, _ = evaluate(
+        "class TooShort(Exception):\n"
+        "    pass\n"
+        "def attempt(raising):\n"
+        "    try:\n"
+        "        if raising:\n"
+        "            raise TooShort('nope')\n"
+        "    except ValueError:\n"
+        "        return 'value'\n"
+        "    except TooShort as exc:\n"
+        "        return 'short:' + exc.args[0]\n"
+        "    else:\n"
+        "        return 'clean'\n"
+        "probe = [attempt(True), attempt(False)]\n",
+        "probe",
+    )
+    assert value == ["short:nope", "clean"]
+
+
+def test_a_base_class_handler_catches_a_derived_exception():
+    value, _ = evaluate(
+        "try:\n    raise ZeroDivisionError('x')\nexcept ArithmeticError:\n    probe = 'caught'\n",
+        "probe",
+    )
+    assert value == "caught"
+
+
+def test_finally_runs_on_both_paths():
+    value, _ = evaluate(
+        "log = []\n"
+        "def attempt(raising):\n"
+        "    try:\n"
+        "        if raising:\n"
+        "            raise ValueError('x')\n"
+        "        return 'ok'\n"
+        "    except ValueError:\n"
+        "        return 'failed'\n"
+        "    finally:\n"
+        "        log.append(raising)\n"
+        "probe = [attempt(False), attempt(True), log]\n",
+        "probe",
+    )
+    assert value == ["ok", "failed", [False, True]]
+
+
+def test_a_bare_raise_reraises_what_is_being_handled():
+    value, _ = evaluate(
+        "def inner():\n"
+        "    try:\n"
+        "        raise ValueError('boom')\n"
+        "    except ValueError:\n"
+        "        raise\n"
+        "try:\n"
+        "    inner()\n"
+        "    probe = 'escaped'\n"
+        "except ValueError as exc:\n"
+        "    probe = exc.args[0]\n",
+        "probe",
+    )
+    assert value == "boom"
+
+
+def test_an_uncaught_raise_is_reported_not_swallowed():
+    _, bag = run("raise ValueError('nothing catches this')\n", strict=False)
+    assert "LL2ODR-W607" in codes(bag)

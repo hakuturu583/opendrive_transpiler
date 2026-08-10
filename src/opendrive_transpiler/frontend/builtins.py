@@ -50,6 +50,34 @@ def _isinstance(value: Any, _types: Any) -> Any:
     return UNKNOWN
 
 
+# The exception hierarchy a map script might plausibly raise or catch. Modelled
+# as names plus the names they derive from, which is all `except` needs.
+_EXCEPTION_TREE: dict[str, tuple[str, ...]] = {
+    "BaseException": (),
+    "Exception": ("BaseException",),
+    "ArithmeticError": ("Exception", "BaseException"),
+    "AssertionError": ("Exception", "BaseException"),
+    "AttributeError": ("Exception", "BaseException"),
+    "IndexError": ("LookupError", "Exception", "BaseException"),
+    "KeyError": ("LookupError", "Exception", "BaseException"),
+    "LookupError": ("Exception", "BaseException"),
+    "NotImplementedError": ("RuntimeError", "Exception", "BaseException"),
+    "OSError": ("Exception", "BaseException"),
+    "RuntimeError": ("Exception", "BaseException"),
+    "StopIteration": ("Exception", "BaseException"),
+    "TypeError": ("Exception", "BaseException"),
+    "ValueError": ("Exception", "BaseException"),
+    "ZeroDivisionError": ("ArithmeticError", "Exception", "BaseException"),
+}
+
+
+def exception_types() -> dict[str, Any]:
+    """Built-in exception classes, built lazily to avoid an import cycle."""
+    from .interp import ExceptionType
+
+    return {name: ExceptionType(name, bases) for name, bases in _EXCEPTION_TREE.items()}
+
+
 SAFE_BUILTINS: dict[str, Any] = {
     "abs": _guard(abs),
     "all": _guard(all),

@@ -39,6 +39,7 @@ from ..diagnostics import (
     E_RECURSION_LIMIT,
     E_STATEMENT_BUDGET,
     E_UNBOUNDED_WHILE,
+    E_UNCAUGHT_RAISE,
     E_UNKNOWN_ATTRIBUTE,
     E_UNSUPPORTED_EXPR,
     E_UNSUPPORTED_STMT,
@@ -50,7 +51,7 @@ from ..diagnostics import (
     SourceSpan,
 )
 from ..ir.centerline import compute_centerline
-from .builtins import SAFE_BUILTINS, SAFE_MODULES, safe_method
+from .builtins import SAFE_BUILTINS, SAFE_MODULES, exception_types, safe_method
 from .imports import (
     MODULE_CONSTANTS,
     QUERY_MODULES,
@@ -103,6 +104,13 @@ class _Abort(Exception):
     """A limit was hit; unwind to the top without pretending to have a result."""
 
 
+class _Raise(Exception):
+    """The input script raised. Carries the script's own exception value."""
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
 # --------------------------------------------------------------------------
 # Callables
 # --------------------------------------------------------------------------
@@ -131,6 +139,8 @@ class Function:
     closure: Env
     defaults: list[Any] = field(default_factory=list)
     kw_defaults: dict[str, Any] = field(default_factory=dict)
+    owner: Any = None
+    """The class whose body defined this function, if any -- what `super()` skips past."""
 
     @property
     def name(self) -> str:
@@ -148,6 +158,105 @@ class Lambda:
 class BoundShadowMethod:
     owner: Any
     name: str
+
+
+@dataclass(eq=False)
+class PyClass:
+    """A class defined in the input script.
+
+    Deliberately minimal: a name, its bases, and the namespace its body produced.
+    That is enough for the only thing map scripts do with classes -- gather some
+    state in `__init__` and read it back through methods.
+    """
+
+    name: str
+    bases: list[Any] = field(default_factory=list)
+    namespace: dict[str, Any] = field(default_factory=dict)
+
+    def lookup(self, name: str) -> tuple[bool, Any]:
+        """Depth-first attribute lookup through the class and its bases."""
+        if name in self.namespace:
+            return True, self.namespace[name]
+        for base in self.bases:
+            if isinstance(base, PyClass):
+                found, value = base.lookup(name)
+                if found:
+                    return True, value
+        return False, None
+
+    def is_subclass_of(self, other: Any) -> bool:
+        if self is other:
+            return True
+        return any(isinstance(base, PyClass) and base.is_subclass_of(other) for base in self.bases)
+
+    def derives_from(self, builtin: str) -> bool:
+        """Whether a built-in exception of this name is anywhere in the bases."""
+        for base in self.bases:
+            if isinstance(base, ExceptionType):
+                if base.name == builtin or builtin in base.bases:
+                    return True
+            elif isinstance(base, PyClass) and base.derives_from(builtin):
+                return True
+        return False
+
+
+@dataclass(eq=False)
+class PyInstance:
+    cls: PyClass
+    fields: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class BoundMethod:
+    instance: Any
+    function: Any
+
+
+@dataclass
+class Super:
+    """What `super()` evaluates to: an instance seen through its bases.
+
+    Attribute lookup starts *after* `owner` in the base list, which is what makes
+    an override able to call the implementation it overrides.
+    """
+
+    instance: Any
+    owner: Any
+
+    def lookup(self, name: str) -> tuple[bool, Any]:
+        bases = getattr(self.owner, "bases", ())
+        for base in bases:
+            if isinstance(base, PyClass):
+                found, value = base.lookup(name)
+                if found:
+                    return True, value
+        return False, None
+
+
+@dataclass(eq=False)
+class ExceptionType:
+    """A built-in exception class, as a name plus the names it derives from."""
+
+    name: str
+    bases: tuple[str, ...] = ()
+
+    def catches(self, raised: ExceptionType) -> bool:
+        """Whether an `except` clause naming this type catches `raised`.
+
+        The direction matters: `except ArithmeticError` catches a
+        `ZeroDivisionError` because *the raised type* derives from this one.
+        """
+        return self is raised or self.name == raised.name or self.name in raised.bases
+
+
+@dataclass(eq=False)
+class ExceptionInstance:
+    type: Any
+    args: tuple[Any, ...] = ()
+
+    @property
+    def name(self) -> str:
+        return getattr(self.type, "name", "Exception")
 
 
 # --------------------------------------------------------------------------
@@ -322,6 +431,9 @@ class Interpreter:
         self.aliases: dict[str, Any] = {}
         self._statements = 0
         self._depth = 0
+        self._yields: list[list[Any]] = []
+        self._handling: list[Any] = []
+        self._exceptions = exception_types()
 
     # ------------------------------------------------------------------
     # Entry point
@@ -336,6 +448,15 @@ class Interpreter:
             pass
         except _Return:
             pass
+        except _Raise as raised:
+            # Uncaught, exactly as it would be when run: the script stops there,
+            # and whatever it had already built is still worth converting.
+            name = getattr(raised.value, "name", type(raised.value).__name__)
+            self.bag.warn(
+                E_UNCAUGHT_RAISE,
+                f"the script raised {name} and did not catch it; converting the map "
+                "as it stood at that point",
+            )
         return self.registry
 
     def _run_main_if_present(self) -> None:
@@ -438,17 +559,13 @@ class Interpreter:
             self.exec_try(node, env)
 
         elif isinstance(node, ast.Raise):
-            # A script that raises is signalling a case it does not support; the
-            # map built so far is still what we convert.
-            raise _Abort
+            self.exec_raise(node, env)
 
         elif isinstance(node, ast.ClassDef):
-            self.bag.error(
-                E_UNSUPPORTED_STMT,
-                "class definitions are not supported; the map-building code must be "
-                "at module level or in plain functions",
-                self.span(node),
-            )
+            env.assign(node.name, self.make_class(node, env))
+
+        elif isinstance(node, ast.Match):
+            self.exec_match(node, env)
 
         else:
             self.bag.error(
@@ -511,21 +628,228 @@ class Interpreter:
             except _Continue:
                 continue
 
+    def exec_raise(self, node: ast.Raise, env: Env) -> None:
+        if node.exc is None:
+            # A bare `raise` re-raises whatever is currently being handled.
+            if self._handling:
+                raise _Raise(self._handling[-1])
+            raise _Raise(ExceptionInstance(ExceptionType("RuntimeError", ("Exception",))))
+        raise _Raise(self.as_exception(self.eval(node.exc, env)))
+
+    @staticmethod
+    def as_exception(value: Any) -> Any:
+        """Normalise what was raised so a handler can match it."""
+        # `raise ValueError` names the class; `raise ValueError(...)` builds one.
+        if isinstance(value, ExceptionType):
+            return ExceptionInstance(value)
+        return value
+
+    @staticmethod
+    def _raises_as(raised: Any, candidate: Any) -> bool:
+        if isinstance(candidate, ExceptionType):
+            if isinstance(raised, ExceptionInstance) and isinstance(raised.type, ExceptionType):
+                return candidate.catches(raised.type)
+            # A script-defined exception caught by a built-in base:
+            # `except Exception` over `class TooShort(Exception)`.
+            if isinstance(raised, PyInstance):
+                return raised.cls.derives_from(candidate.name)
+        if isinstance(candidate, PyClass) and isinstance(raised, PyInstance):
+            return raised.cls.is_subclass_of(candidate)
+        return False
+
+    def handler_matches(self, handler: ast.ExceptHandler, raised: Any, env: Env) -> bool:
+        if handler.type is None:
+            return True  # bare `except:`
+        expected = self.eval(handler.type, env)
+        candidates = expected if isinstance(expected, tuple) else (expected,)
+        return any(self._raises_as(raised, candidate) for candidate in candidates)
+
     def exec_try(self, node: ast.Try, env: Env) -> None:
+        """Real exception semantics: raise, match a handler, unwind.
+
+        Only what the *script* raised is caught. The interpreter's own control
+        signals -- return, break, a budget abort -- pass straight through, or a
+        stray `except Exception` in the input would swallow them.
+        """
         try:
             self.exec_block(node.body, env)
-        except (_Return, _Break, _Continue, _Abort):
-            raise
-        except Exception:
+        except _Raise as raised:
             for handler in node.handlers:
+                if not self.handler_matches(handler, raised.value, env):
+                    continue
                 if handler.name:
-                    env.assign(handler.name, UNKNOWN)
-                self.exec_block(handler.body, env)
+                    env.assign(handler.name, raised.value)
+                self._handling.append(raised.value)
+                try:
+                    self.exec_block(handler.body, env)
+                finally:
+                    self._handling.pop()
+                    if handler.name:
+                        env.vars.pop(handler.name, None)
                 break
+            else:
+                raise
         else:
             self.exec_block(node.orelse, env)
         finally:
             self.exec_block(node.finalbody, env)
+
+    # ------------------------------------------------------------------
+    # Structural pattern matching
+    # ------------------------------------------------------------------
+    def exec_match(self, node: ast.Match, env: Env) -> None:
+        subject = self.eval(node.subject, env)
+        for case in node.cases:
+            captured: dict[str, Any] = {}
+            if not self.pattern_matches(case.pattern, subject, captured, env):
+                continue
+            # Captures bind before the guard runs, because the guard may use them.
+            for name, value in captured.items():
+                env.assign(name, value)
+            if case.guard is not None and not self.truthiness(
+                self.eval(case.guard, env), node, "match guard"
+            ):
+                continue
+            self.exec_block(case.body, env)
+            return
+
+    def pattern_matches(
+        self, pattern: ast.pattern, subject: Any, captured: dict[str, Any], env: Env
+    ) -> bool:
+        if isinstance(pattern, ast.MatchValue):
+            expected = self.eval(pattern.value, env)
+            if is_unknown(expected) or is_unknown(subject):
+                return False
+            try:
+                return bool(subject == expected)
+            except (TypeError, ValueError):
+                return False
+
+        if isinstance(pattern, ast.MatchSingleton):
+            return subject is pattern.value
+
+        if isinstance(pattern, ast.MatchAs):
+            if pattern.pattern is not None and not self.pattern_matches(
+                pattern.pattern, subject, captured, env
+            ):
+                return False
+            if pattern.name:
+                captured[pattern.name] = subject
+            return True  # `case _` and `case name` always match
+
+        if isinstance(pattern, ast.MatchOr):
+            return any(
+                self.pattern_matches(alternative, subject, captured, env)
+                for alternative in pattern.patterns
+            )
+
+        if isinstance(pattern, ast.MatchSequence):
+            return self._match_sequence(pattern, subject, captured, env)
+
+        if isinstance(pattern, ast.MatchMapping):
+            return self._match_mapping(pattern, subject, captured, env)
+
+        if isinstance(pattern, ast.MatchClass):
+            return self._match_class(pattern, subject, captured, env)
+
+        self.bag.warn(
+            E_UNSUPPORTED_STMT,
+            f"unsupported match pattern: {type(pattern).__name__}; case skipped",
+            self.span(pattern),
+        )
+        return False
+
+    def _match_sequence(
+        self, pattern: ast.MatchSequence, subject: Any, captured: dict[str, Any], env: Env
+    ) -> bool:
+        # A string is a sequence to Python but never matches a sequence pattern.
+        if isinstance(subject, (str, bytes)) or not isinstance(subject, (list, tuple)):
+            return False
+
+        stars = [i for i, p in enumerate(pattern.patterns) if isinstance(p, ast.MatchStar)]
+        if not stars:
+            if len(subject) != len(pattern.patterns):
+                return False
+            return all(
+                self.pattern_matches(p, item, captured, env)
+                for p, item in zip(pattern.patterns, subject, strict=True)
+            )
+
+        pivot = stars[0]
+        before = pattern.patterns[:pivot]
+        after = pattern.patterns[pivot + 1 :]
+        if len(subject) < len(before) + len(after):
+            return False
+
+        head = subject[: len(before)]
+        tail = subject[len(subject) - len(after) :] if after else []
+        middle = subject[len(before) : len(subject) - len(after)]
+
+        if not all(
+            self.pattern_matches(p, item, captured, env)
+            for p, item in zip(before, head, strict=True)
+        ):
+            return False
+        if not all(
+            self.pattern_matches(p, item, captured, env)
+            for p, item in zip(after, tail, strict=True)
+        ):
+            return False
+
+        star = pattern.patterns[pivot]
+        if isinstance(star, ast.MatchStar) and star.name:
+            captured[star.name] = list(middle)
+        return True
+
+    def _match_mapping(
+        self, pattern: ast.MatchMapping, subject: Any, captured: dict[str, Any], env: Env
+    ) -> bool:
+        if not isinstance(subject, dict):
+            return False
+        consumed = set()
+        for key_node, value_pattern in zip(pattern.keys, pattern.patterns, strict=True):
+            key = self.eval(key_node, env)
+            if is_unknown(key) or key not in subject:
+                return False
+            if not self.pattern_matches(value_pattern, subject[key], captured, env):
+                return False
+            consumed.add(key)
+        if pattern.rest:
+            captured[pattern.rest] = {k: v for k, v in subject.items() if k not in consumed}
+        return True
+
+    def _match_class(
+        self, pattern: ast.MatchClass, subject: Any, captured: dict[str, Any], env: Env
+    ) -> bool:
+        expected = self.eval(pattern.cls, env)
+        if not self._is_instance_of(subject, expected):
+            return False
+
+        # Positional sub-patterns need __match_args__, which nothing here defines.
+        if pattern.patterns:
+            self.bag.warn(
+                E_UNSUPPORTED_STMT,
+                "positional class patterns need __match_args__, which this "
+                "interpreter does not model; case skipped",
+                self.span(pattern),
+            )
+            return False
+
+        for name, sub_pattern in zip(pattern.kwd_attrs, pattern.kwd_patterns, strict=True):
+            value = self.getattr_value(subject, name, pattern)
+            if is_unknown(value) or not self.pattern_matches(sub_pattern, value, captured, env):
+                return False
+        return True
+
+    @staticmethod
+    def _is_instance_of(subject: Any, expected: Any) -> bool:
+        if isinstance(expected, PyClass):
+            return isinstance(subject, PyInstance) and subject.cls.is_subclass_of(expected)
+        if isinstance(expected, ExceptionType):
+            return isinstance(subject, ExceptionInstance) and Interpreter._raises_as(
+                subject, expected
+            )
+        return False
 
     def exec_import(self, node: ast.Import | ast.ImportFrom, env: Env) -> None:
         if isinstance(node, ast.Import):
@@ -652,6 +976,12 @@ class Interpreter:
     def setattr_shadow(self, owner: Any, name: str, value: Any, node: ast.AST) -> None:
         if is_unknown(owner):
             return
+        if isinstance(owner, PyInstance):
+            owner.fields[name] = value
+            return
+        if isinstance(owner, PyClass):
+            owner.namespace[name] = value
+            return
         if isinstance(owner, ShadowLanelet) and name == "centerline":
             # A user-assigned centerline outranks the computed one, and survives
             # later changes to the bounds -- so it is stored, not recomputed.
@@ -709,6 +1039,8 @@ class Interpreter:
                 return value
             if node.id in SAFE_BUILTINS:
                 return SAFE_BUILTINS[node.id]
+            if node.id in self._exceptions:
+                return self._exceptions[node.id]
             if node.id == "__name__":
                 # Scripts commonly guard the build with `if __name__ == "__main__"`.
                 # Reporting "__main__" runs that block, which is what we want.
@@ -774,6 +1106,20 @@ class Interpreter:
 
         if isinstance(node, ast.Slice):
             return self.eval_slice(node, env)
+
+        if isinstance(node, ast.Yield):
+            if self._yields:
+                self._yields[-1].append(
+                    self.eval(node.value, env) if node.value is not None else None
+                )
+            return None
+
+        if isinstance(node, ast.YieldFrom):
+            source = self.eval(node.value, env)
+            items = self.iterate(source, node)
+            if self._yields and items:
+                self._yields[-1].extend(items)
+            return None
 
         if isinstance(node, ast.NamedExpr):
             value = self.eval(node.value, env)
@@ -1114,6 +1460,40 @@ class Interpreter:
         if isinstance(owner, ModuleRef):
             return self.resolve_module_member(owner, name, node)
 
+        if isinstance(owner, PyInstance):
+            if name in owner.fields:
+                return owner.fields[name]
+            found, value = owner.cls.lookup(name)
+            if found:
+                # A function found on the class is a method: bind it.
+                return BoundMethod(owner, value) if isinstance(value, Function) else value
+            self.bag.warn(
+                E_UNKNOWN_ATTRIBUTE,
+                f"{owner.cls.name} instance has no attribute {name!r}",
+                self.span(node),
+            )
+            return UNKNOWN
+
+        if isinstance(owner, Super):
+            found, value = owner.lookup(name)
+            if not found:
+                self.bag.warn(
+                    E_UNKNOWN_ATTRIBUTE,
+                    f"no base of {getattr(owner.owner, 'name', '?')} defines {name!r}",
+                    self.span(node),
+                )
+                return UNKNOWN
+            return BoundMethod(owner.instance, value) if isinstance(value, Function) else value
+
+        if isinstance(owner, PyClass):
+            found, value = owner.lookup(name)
+            return value if found else UNKNOWN
+
+        if isinstance(owner, ExceptionInstance):
+            if name == "args":
+                return list(owner.args)
+            return UNKNOWN
+
         if isinstance(owner, OpaqueValue):
             return OpaqueCallable(f"{owner.kind}.{name}")
 
@@ -1270,6 +1650,19 @@ class Interpreter:
         if isinstance(func, BoundShadowMethod):
             return self.call_shadow_method(func, args, span)
 
+        if func is SAFE_BUILTINS["isinstance"] and len(args.positional) == 2:
+            return self._isinstance(args.positional[0], args.positional[1])
+
+        if isinstance(func, PyClass):
+            return self.instantiate(func, args, span)
+
+        if isinstance(func, BoundMethod):
+            bound = Args([func.instance, *args.positional], dict(args.keyword))
+            return self.call(func.function, bound, span)
+
+        if isinstance(func, ExceptionType):
+            return ExceptionInstance(func, tuple(args.positional))
+
         if isinstance(func, Function):
             return self.call_user_function(func, args, span)
 
@@ -1284,6 +1677,36 @@ class Interpreter:
 
         return UNKNOWN
 
+    @staticmethod
+    def _is_generator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        """Whether this function's *own* body yields (nested ones do not count)."""
+        stack: list[ast.AST] = list(node.body)
+        while stack:
+            current = stack.pop()
+            if isinstance(current, (ast.Yield, ast.YieldFrom)):
+                return True
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue  # a nested function's yields belong to it, not to us
+            stack.extend(ast.iter_child_nodes(current))
+        return False
+
+    @staticmethod
+    def bind_super(func: Function, args: Args, env: Env) -> None:
+        """Make `super` a local name inside a method.
+
+        CPython does this with a compiler-inserted `__class__` cell; the effect is
+        the same and the mechanism is simpler here. The explicit two-argument form
+        is honoured too, since a script that writes `super(Base, self)` means it.
+        """
+        instance = args.positional[0] if args.positional else None
+
+        def make_super(*given: Any) -> Super:
+            if len(given) == 2:
+                return Super(given[1], given[0])
+            return Super(instance, func.owner)
+
+        env.assign("super", make_super)
+
     def call_user_function(self, func: Function, args: Args, span: SourceSpan) -> Any:
         self._depth += 1
         if self._depth > self.options.max_recursion:
@@ -1297,13 +1720,59 @@ class Interpreter:
         try:
             env = Env(func.closure, self.globals)
             self.bind_arguments(func.node.args, func.defaults, func.kw_defaults, args, env, span)
+            if func.owner is not None:
+                self.bind_super(func, args, env)
+            generator = self._is_generator(func.node)
+            if generator:
+                # Generators are materialised eagerly into a list. Every loop in
+                # this interpreter is bounded anyway, so laziness buys nothing,
+                # and a list is what every consumer here does with one. The one
+                # thing it cannot model is a value *sent* into a yield, which
+                # `yield` therefore evaluates to None.
+                self._yields.append([])
             try:
                 self.exec_block(func.node.body, env)
             except _Return as ret:
+                if generator:
+                    return self._yields.pop()
                 return ret.value
-            return None
+            return self._yields.pop() if generator else None
         finally:
             self._depth -= 1
+
+    def _isinstance(self, value: Any, expected: Any) -> Any:
+        """`isinstance` is answerable for the types this interpreter owns.
+
+        For lanelet2 shadows it still is not: they are not the real classes, so
+        the honest answer stays Unknown and the branch goes through the
+        unresolved-condition policy.
+        """
+        candidates = expected if isinstance(expected, tuple) else (expected,)
+
+        def hit(candidate: Any) -> bool:
+            if isinstance(candidate, PyClass) and isinstance(value, PyInstance):
+                return value.cls.is_subclass_of(candidate)
+            if isinstance(candidate, ExceptionType) and isinstance(value, ExceptionInstance):
+                return isinstance(value.type, ExceptionType) and candidate.matches(value.type)
+            return False
+
+        if any(hit(candidate) for candidate in candidates):
+            return True
+        if all(isinstance(c, (PyClass, ExceptionType)) for c in candidates):
+            return False
+        return UNKNOWN
+
+    def instantiate(self, cls: PyClass, args: Args, span: SourceSpan) -> Any:
+        instance = PyInstance(cls=cls)
+        found, initialiser = cls.lookup("__init__")
+        if found:
+            self.call(BoundMethod(instance, initialiser), args, span)
+        elif cls.derives_from("BaseException"):
+            # What `BaseException.__init__` does: a script-defined exception with
+            # no `__init__` of its own still remembers its arguments, so a handler
+            # can read `exc.args`.
+            instance.fields["args"] = list(args.positional)
+        return instance
 
     def call_lambda(self, func: Lambda, args: Args, span: SourceSpan) -> Any:
         env = Env(func.closure, self.globals)
@@ -1354,15 +1823,7 @@ class Interpreter:
             consumed = set(names) | {a.arg for a in spec.kwonlyargs}
             env.assign(spec.kwarg.arg, {k: v for k, v in args.keyword.items() if k not in consumed})
 
-    def make_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, env: Env) -> Function:
-        if node.decorator_list:
-            # A decorator can replace the function outright, so ignoring one
-            # silently could change the map without anything saying so.
-            self.bag.warn(
-                E_UNSUPPORTED_STMT,
-                f"decorators on {node.name}() are not applied; the undecorated function is used",
-                self.span(node),
-            )
+    def make_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, env: Env) -> Any:
         # Defaults are evaluated once, at definition time -- including mutable
         # ones. That is Python's behaviour, and scripts occasionally rely on it.
         defaults = [self.eval(d, env) for d in node.args.defaults]
@@ -1370,7 +1831,38 @@ class Interpreter:
         for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=False):
             if default is not None:
                 kw_defaults[arg.arg] = self.eval(default, env)
-        return Function(node, env, defaults, kw_defaults)
+        return self.apply_decorators(
+            Function(node, env, defaults, kw_defaults), node.decorator_list, env
+        )
+
+    def apply_decorators(self, value: Any, decorators: list[ast.expr], env: Env) -> Any:
+        """Apply decorators innermost-first, as Python does.
+
+        A decorator can replace what it wraps outright, so applying it is the
+        only way the resulting map matches what the script meant.
+        """
+        for decorator in reversed(decorators):
+            function = self.eval(decorator, env)
+            value = self.call(function, Args([value]), self.span(decorator))
+        return value
+
+    def make_class(self, node: ast.ClassDef, env: Env) -> Any:
+        """Execute a class body and capture what it defined.
+
+        Deliberately minimal -- no metaclasses, no descriptors, no MRO
+        linearisation -- because the only thing map scripts do with a class is
+        gather state in `__init__` and read it back through methods.
+        """
+        body_env = Env(env, self.globals)
+        self.exec_block(node.body, body_env)
+        bases = [self.eval(base, env) for base in node.bases]
+        cls = PyClass(name=node.name, bases=bases, namespace=dict(body_env.vars))
+        # Methods remember the class they were written in, so `super()` inside one
+        # knows where in the base list to resume the search.
+        for value in cls.namespace.values():
+            if isinstance(value, Function) and value.owner is None:
+                value.owner = cls
+        return self.apply_decorators(cls, node.decorator_list, env)
 
     # ------------------------------------------------------------------
     # Shadow methods
