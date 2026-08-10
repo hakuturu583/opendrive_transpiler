@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "opendrive-transpiler"
+version = "0.1.0"
+description = "Transpile lanelet2 map-building Python scripts into OpenDRIVE-generating scripts"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["lanelet2", "opendrive", "xodr", "hd-map", "autonomous-driving", "transpiler"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+# The core transpiler only ever writes Python *text*. It never imports
+# scenariogeneration, numpy or lanelet2, so it installs and runs anywhere.
+dependencies = []
+
+[project.optional-dependencies]
+# Needed only to RUN a generated script and produce a .xodr.
+emit = ["scenariogeneration>=0.14"]
+# Optional round-trip reader used by the verification tests.
+validate = ["pyxodr>=0.1.3"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "opendrive-transpiler[emit]",
+]
+
+[project.urls]
+Homepage = "https://github.com/hakuturu583/opendrive_transpiler"
+Repository = "https://github.com/hakuturu583/opendrive_transpiler"
+Issues = "https://github.com/hakuturu583/opendrive_transpiler/issues"
+
+[project.scripts]
+opendrive-transpile = "opendrive_transpiler.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/opendrive_transpiler"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Fixtures are transpiler *input* and goldens are transpiler *output*; both are
+# data, and reformatting either would defeat the byte-comparison they exist for.
+"tests/fixtures/*" = ["ALL"]
+"tests/golden/*" = ["ALL"]
+
+[tool.ruff.format]
+exclude = ["tests/fixtures/*", "tests/golden/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "needs_emit: requires the [emit] extra (scenariogeneration) to be installed",
+]
