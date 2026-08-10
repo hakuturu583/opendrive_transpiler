@@ -37,6 +37,7 @@ from ..diagnostics import (
     W_EMPTY_SUBTYPE,
     W_NEGATIVE_WIDTH,
     W_SHORT_ROAD,
+    W_UNEQUAL_BOUND_ENDS,
     W_UNKNOWN_ROADMARK,
     W_UNKNOWN_SUBTYPE,
     DiagnosticBag,
@@ -377,6 +378,16 @@ def _report_topology(
             "shared boundary; they become one road with +/- lanes, and its reference "
             "line follows that boundary regardless of --reference-line",
         )
+
+    for lanelet in ir.lanelets:
+        if relations.bounds_misaligned(lanelet):
+            bag.warn(
+                W_UNEQUAL_BOUND_ENDS,
+                f"lanelet #{lanelet.lanelet2_id}: its two bounds cover different "
+                "stretches, so they disagree about where the lanelet ends; anything "
+                "projected onto this road is clamped to its reference line and will "
+                "be silently truncated",
+            )
 
     for lanelet in ir.lanelets:
         if relations.bounds_disagree(lanelet):

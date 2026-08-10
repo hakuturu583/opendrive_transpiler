@@ -28,7 +28,9 @@ intersection and only feeds junction heuristics beyond what this ships.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from itertools import pairwise
 
 from ..geometry.vec import Vec2, dot2, normalize2
 from ..ir.model import LaneletIR
@@ -88,6 +90,60 @@ def bounds_disagree(lanelet: LaneletIR) -> bool:
     if left == (0.0, 0.0) or right == (0.0, 0.0):
         return False
     return dot2(left, right) < 0.0
+
+
+def bounds_misaligned(lanelet: LaneletIR) -> bool:
+    """Whether one bound runs well past where the other ends.
+
+    Anything projected onto a road is clamped to its reference line, so a lanelet
+    whose bounds cover different stretches silently truncates whatever is measured
+    against it -- a barrier outline, an object corner, a lane width sample.
+
+    Two ratios have to be large together, because either alone is ordinary:
+
+    * **Width** -- the end cross-sections against each other. A merge taper narrows
+      from 3.5 m to nearly nothing, so this is 7 on perfectly good geometry.
+    * **Length** -- the two bounds against each other. The outer edge of a bend is
+      longer by `(R + w) / R`, and a turn tight enough to reach 2 has a radius
+      equal to the lane width. That is a pivot, not a road, but it is geometry the
+      lanelet agrees with itself about.
+
+    A lanelet trips both only when its bounds disagree about where it *is*, which
+    the ordinary cases never do: the taper above has a length ratio of 1.003, and
+    the pivot a width ratio of exactly 1.
+    """
+    left, right = lanelet.left.points, lanelet.right.points
+    if len(left) < 2 or len(right) < 2:
+        return False
+
+    start = _distance(left[0], right[0])
+    end = _distance(left[-1], right[-1])
+    if min(start, end) <= 0.0:
+        return False
+
+    left_length = _path_length(left)
+    right_length = _path_length(right)
+    if min(left_length, right_length) <= 0.0:
+        return False
+
+    width_ratio = max(start, end) / min(start, end)
+    length_ratio = max(left_length, right_length) / min(left_length, right_length)
+    return width_ratio > _MISALIGNED_WIDTH_RATIO and length_ratio > _MISALIGNED_LENGTH_RATIO
+
+
+# Both thresholds sit well clear of the widest legitimate geometry in the test
+# corpus (width 1.67, length 1.10) and well below the malformed case that
+# prompted them (width 5.10, length 2.00).
+_MISALIGNED_WIDTH_RATIO = 2.0
+_MISALIGNED_LENGTH_RATIO = 1.5
+
+
+def _distance(a, b) -> float:
+    return math.dist(a.xyz, b.xyz)
+
+
+def _path_length(points) -> float:
+    return sum(_distance(a, b) for a, b in pairwise(points))
 
 
 def _span(points) -> Vec2:

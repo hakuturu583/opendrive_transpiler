@@ -263,3 +263,107 @@ b.attributes['subtype'] = 'road'
     )
     assert sorted(rels.opposing) == [(0, 1)]
     assert len(net.groups) == 1
+
+
+# --------------------------------------------------------------------------
+# Bounds that disagree about where the lanelet is
+# --------------------------------------------------------------------------
+# Everything projected onto a road is clamped to its reference line, so a lanelet
+# whose bounds cover different stretches truncates whatever is measured against
+# it. Two ratios have to be large together, because either alone is ordinary
+# geometry -- these cases pin both halves of that.
+
+
+def misaligned(body: str) -> list[bool]:
+    ir, _index, _rels, _network = analyse(body)
+    return [relations.bounds_misaligned(ll) for ll in ir.lanelets]
+
+
+def test_a_bound_running_past_the_other_is_caught():
+    """The case that prompted this: one bound ends at 20 m, the other at 40."""
+    assert misaligned("""
+a = Lanelet(getId(),
+    LineString3d(getId(), [Point3d(getId(), 0.0, 2.0, 0.0),
+                           Point3d(getId(), 20.0, 2.0, 0.0)]),
+    LineString3d(getId(), [Point3d(getId(), 0.0, -2.0, 0.0),
+                           Point3d(getId(), 40.0, -2.0, 0.0)]))
+a.attributes['subtype'] = 'road'
+""") == [True]
+
+
+def test_a_merge_taper_is_not_misaligned():
+    """Width ratio 7, length ratio 1.003: it narrows, it does not overshoot."""
+    assert misaligned("""
+a = Lanelet(getId(),
+    LineString3d(getId(), [Point3d(getId(), 0.0, 0.0, 0.0),
+                           Point3d(getId(), 40.0, 0.0, 0.0)]),
+    LineString3d(getId(), [Point3d(getId(), 0.0, -3.5, 0.0),
+                           Point3d(getId(), 40.0, -0.5, 0.0)]))
+a.attributes['subtype'] = 'road'
+""") == [False]
+
+
+def test_a_turn_tight_enough_to_double_the_outer_edge_is_not_misaligned():
+    """Length ratio 2, width ratio 1: a pivot is odd, but self-consistent."""
+    assert misaligned("""
+import math
+inner = [Point3d(getId(), 3.5 * math.cos(i * math.pi / 16),
+                 3.5 * math.sin(i * math.pi / 16), 0.0) for i in range(9)]
+outer = [Point3d(getId(), 7.0 * math.cos(i * math.pi / 16),
+                 7.0 * math.sin(i * math.pi / 16), 0.0) for i in range(9)]
+a = Lanelet(getId(), LineString3d(getId(), inner), LineString3d(getId(), outer))
+a.attributes['subtype'] = 'road'
+""") == [False]
+
+
+def test_an_ordinary_curve_is_not_misaligned():
+    assert misaligned("""
+import math
+inner = [Point3d(getId(), 10.0 * math.cos(i * math.pi / 16),
+                 10.0 * math.sin(i * math.pi / 16), 0.0) for i in range(9)]
+outer = [Point3d(getId(), 13.5 * math.cos(i * math.pi / 16),
+                 13.5 * math.sin(i * math.pi / 16), 0.0) for i in range(9)]
+a = Lanelet(getId(), LineString3d(getId(), inner), LineString3d(getId(), outer))
+a.attributes['subtype'] = 'road'
+""") == [False]
+
+
+def test_a_short_wide_lanelet_is_not_misaligned():
+    """A crossing is wider than it is long, and perfectly well formed."""
+    assert misaligned("""
+a = Lanelet(getId(),
+    LineString3d(getId(), [Point3d(getId(), 0.0, 5.0, 0.0),
+                           Point3d(getId(), 0.0, -5.0, 0.0)]),
+    LineString3d(getId(), [Point3d(getId(), 4.0, 5.0, 0.0),
+                           Point3d(getId(), 4.0, -5.0, 0.0)]))
+a.attributes['subtype'] = 'crosswalk'
+""") == [False]
+
+
+def test_a_single_point_bound_never_reaches_this_check():
+    """It is dropped as degenerate earlier, with its own diagnostic."""
+    assert (
+        misaligned("""
+p = Point3d(getId(), 0.0, -2.0, 0.0)
+a = Lanelet(getId(),
+    LineString3d(getId(), [Point3d(getId(), 0.0, 2.0, 0.0),
+                           Point3d(getId(), 40.0, 2.0, 0.0)]),
+    LineString3d(getId(), [p]))
+a.attributes['subtype'] = 'road'
+""")
+        == []
+    )
+
+
+def test_a_zero_length_bound_is_not_reported_as_misaligned():
+    """Dividing by it would raise; the guard has to come first."""
+    ir, _index, _rels, _network = analyse("""
+a = Lanelet(getId(),
+    LineString3d(getId(), [Point3d(getId(), 0.0, 2.0, 0.0),
+                           Point3d(getId(), 40.0, 2.0, 0.0)]),
+    LineString3d(getId(), [Point3d(getId(), 0.0, -2.0, 0.0),
+                           Point3d(getId(), 0.0, -2.0, 0.0)]))
+a.attributes['subtype'] = 'road'
+""")
+    for lanelet in ir.lanelets:
+        assert relations.bounds_misaligned(lanelet) is False
