@@ -18,6 +18,7 @@ from typing import Any
 from ..config import TranspileOptions
 from ..diagnostics import (
     I_AREA_SKIPPED,
+    I_POLYGON_SKIPPED,
     I_REGELEM_SKIPPED,
     W_DEGENERATE_LANELET,
     W_NO_LANELETS,
@@ -104,6 +105,24 @@ class AreaIR:
     lanelet2_id: int
     attributes: dict[str, str] = field(default_factory=dict)
     outer: tuple[BoundIR, ...] = ()
+    inners: tuple[tuple[BoundIR, ...], ...] = ()
+    """Holes. Carried through even though areas are not converted yet, so that
+    the eventual `<object>` outline has them rather than silently losing them."""
+
+
+@dataclass(frozen=True)
+class PolygonIR:
+    """A standalone `Polygon2d`/`Polygon3d`.
+
+    Polygons are map furniture (parking bays, markings) with no OpenDRIVE road
+    equivalent. They are still snapshotted so the run can report how many were
+    dropped -- a script that adds one and hears nothing back would have no way
+    to tell it was ignored.
+    """
+
+    lanelet2_id: int
+    attributes: dict[str, str] = field(default_factory=dict)
+    bound: BoundIR | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +138,7 @@ class ProjectionIR:
 class MapIR:
     lanelets: list[LaneletIR] = field(default_factory=list)
     areas: list[AreaIR] = field(default_factory=list)
+    polygons: list[PolygonIR] = field(default_factory=list)
     regelems: list[RegElemIR] = field(default_factory=list)
     projection: ProjectionIR | None = None
     source_name: str = "map"
@@ -260,8 +280,17 @@ def build_ir(
             lanelet2_id=int(area.id),
             attributes=_snapshot_attributes(area.attributes),
             outer=tuple(_snapshot_bound(b) for b in area.outer),
+            inners=tuple(tuple(_snapshot_bound(b) for b in ring) for ring in area.inners),
         )
         for area in registry.areas
+    ]
+    ir.polygons = [
+        PolygonIR(
+            lanelet2_id=int(polygon.id),
+            attributes=_snapshot_attributes(polygon.storage.attributes),
+            bound=_snapshot_bound(polygon),
+        )
+        for polygon in registry.polygons
     ]
     ir.regelems = [_snapshot_regelem(r) for r in registry.regelems]
 
@@ -282,10 +311,20 @@ def _report_deferred(ir: MapIR, bag: DiagnosticBag) -> None:
         )
 
     if ir.areas:
+        holes = sum(len(area.inners) for area in ir.areas)
+        detail = f" ({holes} inner ring(s) also dropped)" if holes else ""
         bag.info(
             I_AREA_SKIPPED,
-            f"{len(ir.areas)} Area(s) recognised; areas have no OpenDRIVE road "
+            f"{len(ir.areas)} Area(s) recognised{detail}; areas have no OpenDRIVE road "
             "equivalent and are not converted yet (planned as road <object> outlines)",
+        )
+
+    if ir.polygons:
+        bag.info(
+            I_POLYGON_SKIPPED,
+            f"{len(ir.polygons)} standalone Polygon(s) recognised; polygons are map "
+            "furniture with no OpenDRIVE road equivalent and are not converted yet "
+            "(planned as road <object> outlines)",
         )
 
     if ir.regelems:
@@ -309,6 +348,7 @@ __all__ = [
     "LaneletIR",
     "MapIR",
     "PointIR",
+    "PolygonIR",
     "ProjectionIR",
     "RegElemIR",
     "SourceSpan",

@@ -133,6 +133,7 @@ class Registry:
         self.maps: list[ShadowMap] = []
         self.lanelets: list[ShadowLanelet] = []
         self.areas: list[ShadowArea] = []
+        self.polygons: list[ShadowLineString] = []
         self.regelems: list[ShadowRegulatoryElement] = []
         self.projection: ProjectionInfo | None = None
         self._table: dict[str, Callable[[Args, SourceSpan], Any]] = {}
@@ -345,7 +346,11 @@ class Registry:
                 id=_as_int(args.get(0, "id")),
                 attributes=_as_attributes(args.get(2, "attributes")),
             )
-            return ShadowLineString(storage, dim=dim, const=const, hybrid=hybrid, polygon=polygon)
+            shadow = ShadowLineString(storage, dim=dim, const=const, hybrid=hybrid, polygon=polygon)
+            if polygon:
+                # Tracked separately so a run can report how many were dropped.
+                self.polygons.append(shadow)
+            return shadow
 
         return ctor
 

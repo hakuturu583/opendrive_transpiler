@@ -56,6 +56,7 @@ def build_model(
     stats = TranspileStats(
         lanelets_in=len(ir.lanelets),
         areas_skipped=len(ir.areas),
+        polygons_skipped=len(ir.polygons),
         regelems_skipped=len(ir.regelems),
     )
     model = OdrModel(

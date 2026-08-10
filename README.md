@@ -165,6 +165,35 @@ research-grade problem. These checklists are the honest state of it. Unchecked
 rows that the transpiler can detect emit the diagnostic code shown, so what the
 tool reports and what this table promises stay in sync.
 
+**What a tick means differs by table**, so read them together rather than
+counting ticks:
+
+- *Python constructs* — the executor handles it.
+- *lanelet2 API surface* — the transpiler **understands the call**. It does not
+  imply the object reaches the OpenDRIVE output; `Area` is ticked there and is
+  still not converted.
+- *OpenDRIVE features* — it is actually **emitted into the `.xodr`**.
+
+### Not converted yet — the short version
+
+Everything below is parsed, understood, and then deliberately left out. Each one
+emits its code on every run, and the same list is repeated in the generated
+file's header, so a partial conversion can never pass for a complete one.
+
+| Feature | Code | Status |
+|---|---|---|
+| Junctions, connecting roads | `LL2ODR-I901` | A branch ends a road; the roads are emitted unconnected |
+| Regulatory elements → `<signal>` | `LL2ODR-I902` | Parsed and attached to lanelets, never emitted |
+| `Area` (incl. inner rings/holes) | `LL2ODR-I903` | Snapshotted whole, awaiting `<object>` outlines |
+| Standalone `Polygon2d`/`Polygon3d` | `LL2ODR-I904` | Map furniture; same plan as `Area` |
+| `RightOfWay` / `AllWayStop` priority | `LL2ODR-I905` | Needs junction support first |
+| MGRS / geocentric projections | `LL2ODR-I906` | No single PROJ equivalent |
+| Two-way lanelets as `+`/`-` lanes | `LL2ODR-I907` | Emitted as separate roads instead |
+| UTM `useOffset` false easting | `LL2ODR-I908` | Zone is correct; the origin shift is not applied |
+| `load()` from an `.osm` file | `LL2ODR-E402` | The map exists only at runtime; nothing to transpile |
+| Arc/spiral/paramPoly3 fitting | — | `--fit` refuses the value rather than downgrading |
+| Centerline reference line | — | `--reference-line` refuses the value |
+
 ### Python constructs the symbolic executor handles
 
 - [x] Assignment, chained assignment, augmented (`+=`), annotated (`x: T = …`)
@@ -208,9 +237,11 @@ tool reports and what this table promises stay in sync.
 - [x] `GPSPoint` (`lat`, `lon`, `ele`, and the `alt` alias)
 - [x] `AttributeMap` — `str → str`, non-string values coerced with `LL2ODR-W805`
 - [x] `LineString2d` / `LineString3d` — empty, aliasing and `(id, points, attributes)` forms
-- [x] `ConstLineString*`, `ConstHybridLineString*`, `Polygon*`, `ConstPolygon*`, `ConstHybridPolygon*`
+- [x] `ConstLineString*` and `ConstHybridLineString*`
+- [x] `Polygon*`, `ConstPolygon*`, `ConstHybridPolygon*` — parsed; standalone
+      polygons are **not converted** (`LL2ODR-I904`)
 - [x] `Lanelet` / `ConstLanelet` — both constructor forms
-- [x] `Area` / `ConstArea` — constructed and recorded (not converted; see below)
+- [x] `Area` / `ConstArea` — parsed, including inner rings; **not converted** (`LL2ODR-I903`)
 - [x] `LaneletMap` / `LaneletSubmap`, all six layers, `add()` with id assignment
 - [x] `createMapFrom*` / `createSubmapFrom*` (points, line strings, polygons, lanelets, areas)
 - [x] `getId()` / `registerId()`
@@ -229,6 +260,7 @@ tool reports and what this table promises stay in sync.
 - [x] `Lanelet.centerline` — computed with a verified port of lanelet2's own algorithm,
       and overridable by assignment
 - [x] `Area`: `outerBound`, `innerBounds`, `outerBoundPolygon`, regulatory elements
+      (inner rings are carried into the IR so the eventual outline keeps its holes)
 - [x] Layers: `exists`, `get`, `__getitem__`, `__contains__`, `len`, iteration, `uniqueId`
 - [ ] Layers: `search(bbox)`, `nearest(point, n)`, `findUsages` (return empty)
 
@@ -278,7 +310,8 @@ build a map and then run dozens of queries; we want the map.
 - [ ] `<junction>` / `<connection>` and connecting roads (`LL2ODR-I901`)
 - [ ] Junction `<priority>` from `RightOfWay` / `AllWayStop` (`LL2ODR-I905`)
 - [ ] `<signal>` from `TrafficLight` / `TrafficSign` / `SpeedLimit`
-- [ ] `<object>` / outlines from `Area`, guard rails, crosswalk markings (`LL2ODR-I903`)
+- [ ] `<object>` / outlines from `Area` (`LL2ODR-I903`) and standalone `Polygon`
+      (`LL2ODR-I904`); guard rails and crosswalk markings
 - [ ] Lane-count changes (merge/split) as a single road via `LaneDef`
 
 ---
@@ -297,7 +330,7 @@ Codes are namespaced by stage, so a code alone says where to look.
 | `W6xx` | Control flow |
 | `W7xx` | Geometry |
 | `W8xx` | Attribute mapping |
-| `I9xx` | Recognised but deliberately not converted |
+| `I9xx` | Recognised but deliberately not converted (see the table above) |
 
 By default the first **error** aborts. `--best-effort` converts what is
 convertible and reports the rest; `--diagnostics json` makes the output

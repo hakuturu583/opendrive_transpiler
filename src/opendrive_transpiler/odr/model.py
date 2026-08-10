@@ -174,6 +174,7 @@ class TranspileStats:
     lanes: int = 0
     junctions: int = 0
     areas_skipped: int = 0
+    polygons_skipped: int = 0
     regelems_skipped: int = 0
 
     def describe(self) -> str:
@@ -186,6 +187,8 @@ class TranspileStats:
             parts.append(f"{self.lanelets_skipped} lanelets skipped")
         if self.areas_skipped:
             parts.append(f"{self.areas_skipped} areas skipped")
+        if self.polygons_skipped:
+            parts.append(f"{self.polygons_skipped} polygons skipped")
         if self.regelems_skipped:
             parts.append(f"{self.regelems_skipped} regulatory elements skipped")
         return ", ".join(parts)

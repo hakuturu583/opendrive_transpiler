@@ -413,3 +413,52 @@ def test_regulatory_element_is_recorded_and_reported():
     )
     assert ir.lanelets[0].regelems[0].kind == "TrafficLight"
     assert "LL2ODR-I902" in codes(bag)
+
+
+# --------------------------------------------------------------------------
+# Features that are recognised but deliberately not converted
+# --------------------------------------------------------------------------
+
+
+def test_areas_are_reported_with_their_holes():
+    """Silence here would be indistinguishable from "there was no area"."""
+    ir, bag = to_ir(
+        "from lanelet2.core import Area, AttributeMap\n"
+        "def ring(x0, y0, x1, y1):\n"
+        "    pts = [Point3d(getId(), x0, y0, 0.0), Point3d(getId(), x1, y0, 0.0),\n"
+        "           Point3d(getId(), x1, y1, 0.0), Point3d(getId(), x0, y1, 0.0)]\n"
+        "    return [LineString3d(getId(), [pts[i], pts[(i + 1) % 4]]) for i in range(4)]\n"
+        "a = Area(getId(), ring(0.0, 0.0, 10.0, 10.0), [ring(3.0, 3.0, 6.0, 6.0)],\n"
+        "         AttributeMap({'subtype': 'parking'}))\n",
+        strict=False,
+    )
+    assert len(ir.areas) == 1
+    assert ir.areas[0].attributes["subtype"] == "parking"
+    # The hole is carried through rather than dropped at the IR boundary.
+    assert len(ir.areas[0].inners) == 1
+    assert "LL2ODR-I903" in codes(bag)
+    assert "inner ring" in next(d.message for d in bag if d.code == "LL2ODR-I903")
+
+
+def test_standalone_polygons_are_reported():
+    ir, bag = to_ir(
+        "from lanelet2.core import Polygon3d\n"
+        "p = Polygon3d(getId(), [Point3d(getId(), 0.0, 0.0, 0.0),\n"
+        "                        Point3d(getId(), 1.0, 0.0, 0.0),\n"
+        "                        Point3d(getId(), 1.0, 1.0, 0.0)])\n",
+        strict=False,
+    )
+    assert len(ir.polygons) == 1
+    assert "LL2ODR-I904" in codes(bag)
+
+
+def test_a_lanelet_bound_is_not_mistaken_for_a_polygon():
+    """Only real Polygon* constructions count; boundaries must not inflate the tally."""
+    ir, _ = to_ir(
+        "ll = Lanelet(1, LineString3d(2, "
+        "[Point3d(3, 0.0, 1.0, 0.0), Point3d(4, 5.0, 1.0, 0.0)]),\n"
+        "             LineString3d(5, "
+        "[Point3d(6, 0.0, -1.0, 0.0), Point3d(7, 5.0, -1.0, 0.0)]))\n",
+        strict=False,
+    )
+    assert ir.polygons == []
