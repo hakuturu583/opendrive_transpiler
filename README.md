@@ -52,6 +52,7 @@ from opendrive_transpiler import transpile, transpile_to_xodr
 result = transpile("my_map.py")
 print(result.code)                   # the generated Python
 print(result.stats.describe())       # "4/4 lanelets converted, 1 roads, 4 lanes"
+print(result.stats.junctions, result.stats.signals, result.stats.objects)
 for note in result.diagnostics:
     print(note)                      # what was assumed, approximated or skipped
 
@@ -115,7 +116,7 @@ input .py ──ast.parse──▶ AST ──symbolic exec──▶ IR ──inf
 | Execute | `frontend/interp.py` | Interprets lanelet2 calls against shadow objects |
 | Freeze | `ir/` | Snapshots the result; ports lanelet2's centerline algorithm |
 | Infer | `topology/` | Derives successor and adjacency relations from geometry |
-| Map | `mapping/`, `geometry/` | Chooses reference lines, widths, lane types, road marks |
+| Map | `mapping/`, `geometry/` | Reference lines, widths, lane types, road marks, junctions, signals, objects |
 | Emit | `codegen/` | Writes the `scenariogeneration` script |
 | Run | `runner.py` | Optionally executes it to write the `.xodr` |
 
@@ -131,30 +132,33 @@ package just generated**, not your input.
 
 ### Design decisions worth knowing
 
-**The reference line is the outer-left boundary of the leftmost lanelet**, with
-every forward lane emitted to its right as `-1, -2, …`. A centerline reference
-would force a single-lanelet road into a `+1`/`-1` pair of half-width lanes and
-break lane linking, and "which lanelet is the middle" has no answer for an even
-lane count. The outer-left bound is *real input geometry*, so the planView error
-is exactly zero.
+**By default the reference line is the outer-left boundary of the leftmost
+lanelet**, with every lane emitted to its right as `-1, -2, …`. That bound is
+*real input geometry*, so the planView error is exactly zero, and the layout
+generalises unchanged from one lane to N. `--reference-line=centerline` follows
+the computed centre instead, putting lanes on both sides as `+1`/`-1` and
+recording where lane 0 sits with `<laneOffset>` — exact only where the centreline
+passes through vertices, which is why it is not the default.
 
-**The planView is one `<line>` per polyline segment.** Every vertex lands on its
-input coordinate — a round-trip test reads the `.xodr` back and asserts agreement
-to under 1e-9 m. The cost is that the heading is discontinuous at each vertex
-(C0, not C1). Curvature-continuous output is a *fitting* problem with unavoidable
-positional error, so it belongs behind a flag, not in the default path.
+**By default the planView is one `<line>` per polyline segment.** Every vertex
+lands on its input coordinate — a round-trip test reads the `.xodr` back and
+asserts agreement to under 1e-9 m. The cost is that the heading is discontinuous
+at each vertex (C0, not C1). `--fit=arc` and `--fit=parampoly3` buy curvature
+continuity for up to `chord_tolerance` of positional error; that trade is opt-in
+because exactness is the more defensible default for an HD map.
 
-**Chains of lanelets become one road with many lane sections.** That is what the
-OpenDRIVE constructs mean: a multi-`laneSection` road *is* a run of consecutive
-cross-sections with the same lane count. A chain stops at a branch, a merge, or a
-change in lane count.
+**Chains of lanelets become one road with many lane sections**, and the lane
+*count* may change between them: a lane drop is a lane section change, not a new
+road, so lanes are linked by lanelet succession rather than by matching ids. A
+chain stops only where the correspondence becomes ambiguous — a branch or a merge
+— and those become a `<junction>` whose connecting roads are the branch lanelets
+themselves, carrying their own exact geometry rather than a synthesized arc.
 
 **Nothing is dropped silently.** Every feature that is recognised but not
 converted emits a diagnostic naming it, and the same list is repeated in the
 generated file's header. A half-converted HD map that looks complete is worse
-than one that says what is missing. For the same reason, options that are
-planned but not yet implemented (`--fit=arc`, `--reference-line=centerline`) are
-*refused* rather than quietly falling back.
+than one that says what is missing. For the same reason, an option value that is
+planned but not implemented is *refused* rather than quietly falling back.
 
 ---
 
@@ -170,29 +174,24 @@ counting ticks:
 
 - *Python constructs* — the executor handles it.
 - *lanelet2 API surface* — the transpiler **understands the call**. It does not
-  imply the object reaches the OpenDRIVE output; `Area` is ticked there and is
-  still not converted.
+  by itself imply the object reaches the OpenDRIVE output; check the third table
+  for that.
 - *OpenDRIVE features* — it is actually **emitted into the `.xodr`**.
 
 ### Not converted yet — the short version
 
-Everything below is parsed, understood, and then deliberately left out. Each one
-emits its code on every run, and the same list is repeated in the generated
-file's header, so a partial conversion can never pass for a complete one.
+Most of the original deferred list is now converted. What remains is here, with
+the reason, because "not done yet" and "cannot be done this way" are different
+things and the difference matters when planning around it.
 
-| Feature | Code | Status |
+| Feature | Code | Why it is still open |
 |---|---|---|
-| Junctions, connecting roads | `LL2ODR-I901` | A branch ends a road; the roads are emitted unconnected |
-| Regulatory elements → `<signal>` | `LL2ODR-I902` | Parsed and attached to lanelets, never emitted |
-| `Area` (incl. inner rings/holes) | `LL2ODR-I903` | Snapshotted whole, awaiting `<object>` outlines |
-| Standalone `Polygon2d`/`Polygon3d` | `LL2ODR-I904` | Map furniture; same plan as `Area` |
-| `RightOfWay` / `AllWayStop` priority | `LL2ODR-I905` | Needs junction support first |
-| MGRS / geocentric projections | `LL2ODR-I906` | No single PROJ equivalent |
-| Two-way lanelets as `+`/`-` lanes | `LL2ODR-I907` | Emitted as separate roads instead |
-| UTM `useOffset` false easting | `LL2ODR-I908` | Zone is correct; the origin shift is not applied |
-| `load()` from an `.osm` file | `LL2ODR-E402` | The map exists only at runtime; nothing to transpile |
-| Arc/spiral/paramPoly3 fitting | — | `--fit` refuses the value rather than downgrading |
-| Centerline reference line | — | `--reference-line` refuses the value |
+| Junction `<priority>` from `RightOfWay` / `AllWayStop` | `LL2ODR-I905` | **Blocked by the backend.** `scenariogeneration` does not model `<priority>` at all, so it cannot be emitted without patching it or writing XML directly. |
+| Geocentric `<geoReference>` | `LL2ODR-I906` | **No equivalent exists.** Geocentric coordinates are earth-centred XYZ; there is no planar PROJ string that means the same thing. |
+| Two-way lanelets as `+`/`-` lanes | `LL2ODR-I907` | Not done. Opposing lanes are emitted as separate roads, which is valid but coarser. Needs the antiparallel-neighbour detection extended and the group ordering made direction-aware. |
+| `<spiral>` fitting | — | Not done. Fitting a clothoid to a polyline is a genuinely harder problem than arcs or cubics; `--fit=arc` and `--fit=parampoly3` cover the continuity case. |
+| `load()` / `loadRobust()` from an `.osm` | `LL2ODR-E402` | Not done, and it would change what this tool is: it converts maps a script *builds*, so reading one would mean adding an OSM parser and full inverse projections. |
+| `class`, `match`, generators, real exception unwinding, seeded `random` | `LL2ODR-E201` / `E202` | Not done. Map-building scripts do not use these; each is reported with its source location rather than silently mishandled. |
 
 ### Python constructs the symbolic executor handles
 
@@ -219,7 +218,7 @@ file's header, so a partial conversion can never pass for a complete one.
 - [x] Three-valued conditions: an unresolvable `if` takes one branch and says so
       (`LL2ODR-W601`), configurable with `--on-unknown-branch`
 - [ ] `class` definitions — `LL2ODR-E201`
-- [ ] Decorators — reported and ignored (`LL2ODR-E201`)
+- [ ] Decorators — reported, then the undecorated function is used (`LL2ODR-E201`)
 - [ ] `match` statements — `LL2ODR-E201`
 - [ ] Generators (`yield`), `async`/`await` — `LL2ODR-E202`
 - [ ] Exception *semantics* (a raised exception aborts rather than unwinding)
@@ -238,16 +237,16 @@ file's header, so a partial conversion can never pass for a complete one.
 - [x] `AttributeMap` — `str → str`, non-string values coerced with `LL2ODR-W805`
 - [x] `LineString2d` / `LineString3d` — empty, aliasing and `(id, points, attributes)` forms
 - [x] `ConstLineString*` and `ConstHybridLineString*`
-- [x] `Polygon*`, `ConstPolygon*`, `ConstHybridPolygon*` — parsed; standalone
-      polygons are **not converted** (`LL2ODR-I904`)
+- [x] `Polygon*`, `ConstPolygon*`, `ConstHybridPolygon*`; standalone polygons are
+      emitted as `<object>` outlines
 - [x] `Lanelet` / `ConstLanelet` — both constructor forms
-- [x] `Area` / `ConstArea` — parsed, including inner rings; **not converted** (`LL2ODR-I903`)
+- [x] `Area` / `ConstArea` — including inner rings, emitted as `<object>` outlines
 - [x] `LaneletMap` / `LaneletSubmap`, all six layers, `add()` with id assignment
 - [x] `createMapFrom*` / `createSubmapFrom*` (points, line strings, polygons, lanelets, areas)
 - [x] `getId()` / `registerId()`
-- [ ] `CompoundLineString*` / `CompoundPolygon*` / `CompoundHybrid*`
-- [ ] `LaneletSequence`
-- [ ] `BoundingBox2d` / `BoundingBox3d` / `Vector2d`
+- [x] `CompoundLineString*` / `CompoundPolygon*` / `CompoundHybrid*` — views, not copies
+- [x] `LaneletSequence`
+- [x] `BoundingBox2d` / `BoundingBox3d`; `Vector2d` refuses construction, as lanelet2 does
 
 **Members and methods**
 
@@ -262,7 +261,7 @@ file's header, so a partial conversion can never pass for a complete one.
 - [x] `Area`: `outerBound`, `innerBounds`, `outerBoundPolygon`, regulatory elements
       (inner rings are carried into the IR so the eventual outline keeps its holes)
 - [x] Layers: `exists`, `get`, `__getitem__`, `__contains__`, `len`, iteration, `uniqueId`
-- [ ] Layers: `search(bbox)`, `nearest(point, n)`, `findUsages` (return empty)
+- [x] Layers: `search(bbox)`, `nearest(point, n)`, `findUsages` (structural, not spatial)
 
 **Regulatory elements** — all are parsed and recorded; none are converted yet (`LL2ODR-I902`)
 
@@ -271,7 +270,8 @@ file's header, so a partial conversion can never pass for a complete one.
 - [x] Autoware extension: `Crosswalk`, `DetectionArea`, `NoParkingArea`,
       `NoStoppingArea`, `RoadMarking`, `SpeedBump`, `AutowareTrafficLight`
 - [x] `RegulatoryElement` and `VirtualTrafficLight` refuse construction, as lanelet2 does
-- [ ] Conversion to OpenDRIVE `<signal>` / junction `<priority>`
+- [x] `TrafficLight`, `SpeedLimit`, `TrafficSign`, `AutowareTrafficLight` → `<signal>`
+- [ ] `RightOfWay` / `AllWayStop` → junction `<priority>` (`LL2ODR-I905`, backend gap)
 
 **I/O and projection**
 
@@ -280,8 +280,10 @@ file's header, so a partial conversion can never pass for a complete one.
       `TransverseMercatorProjector` → `<geoReference>` PROJ string
 - [x] `write()` / `writeRobust()` — accepted and ignored (we convert the map, not the file)
 - [ ] `load()` / `loadRobust()` — reported (`LL2ODR-E402`); the map exists only at runtime
-- [ ] `GeocentricProjector`, `MGRSProjector` — no PROJ equivalent (`LL2ODR-I906`)
-- [ ] UTM `useOffset=True` false-easting correction (`LL2ODR-I908`)
+- [x] `MGRSProjector` — reproduced as UTM offset to the origin's 100 km square
+- [ ] `GeocentricProjector` — earth-centred XYZ has no planar equivalent (`LL2ODR-I906`)
+- [x] UTM `useOffset=True` false easting, via a Krüger-series forward projection
+      (agrees with pyproj to under 0.1 mm)
 
 **Query APIs** — recognised, inert, and reported once (`LL2ODR-I304`). A script may
 build a map and then run dozens of queries; we want the map.
@@ -301,18 +303,19 @@ build a map and then run dozens of queries; we want the map.
 - [x] Lane `<link>` between consecutive lane sections
 - [x] Road `<link>` predecessor/successor where the correspondence is unambiguous
 - [x] `<type>` with `<speed>` from `speed_limit`
-- [ ] `<arc>`, `<spiral>`, `<paramPoly3>` planView fitting (`--fit` refuses these)
-- [ ] Centerline reference line (`--reference-line=centerline` is refused, not ignored)
-- [ ] Cubic (`c`, `d` ≠ 0) lane width fitting
-- [ ] `<laneOffset>`
-- [ ] `<superelevation>`, road `<shape>`
-- [ ] Left lanes (`+1, +2, …`) for opposing traffic; two-way lanelets (`LL2ODR-I907`)
-- [ ] `<junction>` / `<connection>` and connecting roads (`LL2ODR-I901`)
-- [ ] Junction `<priority>` from `RightOfWay` / `AllWayStop` (`LL2ODR-I905`)
-- [ ] `<signal>` from `TrafficLight` / `TrafficSign` / `SpeedLimit`
-- [ ] `<object>` / outlines from `Area` (`LL2ODR-I903`) and standalone `Polygon`
-      (`LL2ODR-I904`); guard rails and crosswalk markings
-- [ ] Lane-count changes (merge/split) as a single road via `LaneDef`
+- [x] `<arc>` and `<paramPoly3>` planView fitting (`--fit=arc` / `--fit=parampoly3`)
+- [x] Centerline reference line (`--reference-line=centerline`)
+- [x] Cubic (`c`, `d` ≠ 0) width and elevation fitting (`--cubic-profiles`)
+- [x] `<laneOffset>` where the reference line is not a boundary
+- [x] `<superelevation>` from the height difference across the cross-section
+- [x] `<junction>` / `<connection>` with the branch lanelets as connecting roads
+- [x] `<signal>` from `TrafficLight` / `TrafficSign` / `SpeedLimit`
+- [x] `<object>` outlines from `Area` (including holes) and standalone `Polygon`
+- [x] Lane-count changes as lane sections of differing width, linked lane by lane
+- [ ] `<spiral>` planView fitting
+- [ ] Left lanes (`+1, +2, …`) for opposing traffic (`LL2ODR-I907`)
+- [ ] Junction `<priority>` (`LL2ODR-I905`) — not modelled by the backend
+- [ ] Road `<shape>`; guard rails and crosswalk markings as objects
 
 ---
 
@@ -337,6 +340,18 @@ convertible and reports the rest; `--diagnostics json` makes the output
 machine-readable. Exit codes: `0` clean, `1` warnings under `--strict`,
 `2` errors, `3` usage.
 
+### Options worth knowing
+
+```bash
+--fit {line,arc,parampoly3}          # exact lines (default), arcs, or C1 cubics
+--reference-line {left-bound,centerline}
+--cubic-profiles                     # one cubic per width/elevation where it fits
+--no-junctions --no-signals --no-objects
+```
+
+Junctions, signals and objects are all **on** by default; the `--no-` flags turn
+them off, and the run then says what it left out.
+
 ## Documented assumptions
 
 lanelet2 does not carry these, so the transpiler picks a convention and says so.
@@ -348,6 +363,7 @@ All are configurable.
 | Thick road-mark width | 0.30 m | `TranspileOptions.thick_mark_width` |
 | Dash pattern | 3.0 m line / 6.0 m gap (German convention) | `dash_length`, `dash_space` |
 | Bare `speed_limit` number | km/h (lanelet2 convention) | — |
+| Signal type codes | OpenDRIVE generic catalogue (`1000001` light, `274` speed) | `mapping/furniture.py` |
 | Same-node tolerance | 1 mm | `--point-tolerance` |
 | Width sampling step | 5 m | `--width-sample-step` |
 
