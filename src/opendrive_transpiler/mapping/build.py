@@ -29,6 +29,7 @@ from ..diagnostics import (
     I_REGELEM_SKIPPED,
     I_TWO_WAY,
     W_BAD_SPEED_LIMIT,
+    W_BOUNDS_DISAGREE,
     W_BOUNDS_SWAPPED,
     W_EMPTY_SUBTYPE,
     W_NEGATIVE_WIDTH,
@@ -253,9 +254,27 @@ def _report_topology(
         bag.info(
             I_TWO_WAY,
             f"lanelets #{ir.lanelets[left].lanelet2_id} and "
-            f"#{ir.lanelets[right].lanelet2_id} share a boundary in opposite directions; "
-            "opposing lanes are emitted as separate roads rather than +/- lanes",
+            f"#{ir.lanelets[right].lanelet2_id} travel in opposite directions across a "
+            "shared boundary; they become one road with +/- lanes, and its reference "
+            "line follows that boundary regardless of --reference-line",
         )
+
+    for lanelet in ir.lanelets:
+        if relations.bounds_disagree(lanelet):
+            bag.warn(
+                W_BOUNDS_DISAGREE,
+                f"lanelet #{lanelet.lanelet2_id}: its two bounds run in opposite "
+                "directions, so the lanelet does not say which way traffic goes; "
+                "the left bound was taken as authoritative",
+            )
+
+    for lanelet in ir.lanelets:
+        if not lanelet.one_way:
+            bag.info(
+                I_TWO_WAY,
+                f"lanelet #{lanelet.lanelet2_id} is tagged one_way=no; emitted as "
+                "LaneType.bidirectional, whose consumer support varies",
+            )
 
 
 # --------------------------------------------------------------------------
@@ -386,7 +405,7 @@ class _RoadBuilder:
         if self.options.reference_line != "centerline":
             return []
         boundaries, _attributes, _owners = self.cross_section(group)
-        center = self._center_index(boundaries, reference)
+        center = self._center_index(boundaries, reference, group)
         stations_ = sample_stations(reference, self.options.width_sample_step)
         values = offsets_along(reference, stations_, boundaries[center])
         records = build_profile(stations_, values, tolerance=self.options.width_tolerance)
@@ -413,6 +432,12 @@ class _RoadBuilder:
         for position, member in enumerate(group.members):
             lanelet = lanelets[member]
             left, right, left_attrs, right_attrs = self.oriented_bounds(lanelet)
+            if group.reversed_[position]:
+                # This lanelet faces the other way, so its own right edge is the
+                # road's left edge, and its polylines have to be turned round to
+                # run with the road's s-axis.
+                left, right = list(reversed(right)), list(reversed(left))
+                left_attrs, right_attrs = right_attrs, left_attrs
             if position == 0:
                 boundaries.append(left)
                 attributes.append(left_attrs)
@@ -422,9 +447,31 @@ class _RoadBuilder:
 
         return boundaries, attributes, owners
 
+    def centre_boundary(self, group: grouping.LaneGroup) -> int | None:
+        """For a two-way group, the boundary dividing the two carriageways.
+
+        That boundary is where lane 0 has to sit: opposing lanes then fall on the
+        `+` side and forward lanes on the `-` side, which is precisely what an
+        OpenDRIVE left lane means. Any other choice puts traffic on the wrong
+        side of the reference line, so this overrides `--reference-line`.
+        """
+        if not group.two_way:
+            return None
+        for position in range(len(group.members) - 1):
+            if group.reversed_[position] and not group.reversed_[position + 1]:
+                # Boundary `position + 1` separates member `position` from the
+                # next one, and the direction changes across it.
+                return position + 1
+        return None
+
     def _group_reference(self, group: grouping.LaneGroup) -> list[Vec3]:
         """The polyline the planView follows for this cross-section."""
         boundaries, _attributes, _owners = self.cross_section(group)
+        divider = self.centre_boundary(group)
+        if divider is not None:
+            # Two-way: follow the boundary between the carriageways, so the two
+            # directions land on opposite sides of the reference line.
+            return boundaries[divider]
         if self.options.reference_line == "centerline" and len(boundaries) >= 2:
             # The centre of the whole cross-section, using lanelet2's own
             # algorithm so a script that reads `lanelet.centerline` and the
@@ -432,8 +479,17 @@ class _RoadBuilder:
             return centerline_coords(boundaries[0], boundaries[-1]) or boundaries[0]
         return boundaries[0]
 
-    def _center_index(self, boundaries: list[list[Vec3]], reference: list[Vec3]) -> int:
+    def _center_index(
+        self,
+        boundaries: list[list[Vec3]],
+        reference: list[Vec3],
+        group: grouping.LaneGroup | None = None,
+    ) -> int:
         """Which boundary lane 0 sits on: the one nearest the reference line."""
+        if group is not None:
+            forced = self.centre_boundary(group)
+            if forced is not None:
+                return forced
         if self.options.reference_line != "centerline":
             return 0
         stations_ = sample_stations(reference, self.options.width_sample_step)
@@ -464,7 +520,7 @@ class _RoadBuilder:
         road_id: int,
     ) -> LaneSectionSpec:
         boundaries, attributes, owners = self.cross_section(group)
-        center = self._center_index(boundaries, local_reference)
+        center = self._center_index(boundaries, local_reference, group)
 
         center_mark = self._road_mark(attributes[center], f"road {road_id} centre")
         section = LaneSectionSpec(s=s, center_road_mark=center_mark)
@@ -534,7 +590,7 @@ class _RoadBuilder:
                 f"(minimum width {minimum:.4g} m)",
             )
 
-        lane_type, recognised = tables.lane_type_for(lanelet.subtype)
+        lane_type, recognised = tables.lane_type_for(lanelet.subtype, one_way=lanelet.one_way)
         if not lanelet.subtype:
             self.bag.warn(
                 W_EMPTY_SUBTYPE,

@@ -30,12 +30,31 @@ from .relations import Relations
 
 @dataclass
 class LaneGroup:
-    """One cross-section: lanelet indices ordered left to right."""
+    """One cross-section: lanelet indices ordered left to right.
+
+    "Left" is relative to the *group's* forward direction, which is the
+    direction of its first member. A member travelling the other way is marked
+    in `reversed_`, and its own left/right naming is mirrored relative to the
+    group -- what it calls its right edge is the group's left edge.
+    """
 
     members: list[int] = field(default_factory=list)
+    reversed_: list[bool] = field(default_factory=list)
+    """Per member: does it travel against the group's forward direction?"""
 
     def __len__(self) -> int:
         return len(self.members)
+
+    def __post_init__(self) -> None:
+        if not self.reversed_:
+            self.reversed_ = [False] * len(self.members)
+
+    @property
+    def two_way(self) -> bool:
+        return any(self.reversed_)
+
+    def is_reversed(self, member: int) -> bool:
+        return self.reversed_[self.members.index(member)]
 
 
 @dataclass
@@ -65,60 +84,92 @@ class Network:
 
 def build(lanelets: list[LaneletIR], relations: Relations) -> Network:
     network = Network()
-    network.two_way_pairs = sorted(relations.antiparallel)
+    network.two_way_pairs = sorted(relations.opposing)
     _build_groups(lanelets, relations, network)
     _build_chains(relations, network)
     network.branch_lanelets = sorted(i for i in range(len(lanelets)) if relations.is_branch(i))
     return network
 
 
-def _same_direction_neighbour(relations: Relations, index: int) -> int | None:
-    """The lanelet immediately right of `index`, if it travels the same way.
+def _neighbour_chain(relations: Relations, start: int) -> list[tuple[int, bool]]:
+    """Walk right from `start`, crossing into opposing traffic when it is there.
 
-    Opposing-direction neighbours share a boundary too, but they belong on the
-    other side of the reference line as positive-id lanes. That is Phase 2, so
-    here they simply do not group.
+    Returns `(index, reversed)` pairs. A two-way road is one cross-section: the
+    opposing carriageway is reached through the boundary the two share, and from
+    there the walk continues in *its* left direction, because right-for-them is
+    left-for-us.
     """
-    neighbour = relations.right_of.get(index)
-    if neighbour is None:
-        return None
-    pair = (min(index, neighbour), max(index, neighbour))
-    if pair in relations.antiparallel:
-        return None
-    return neighbour
+    out: list[tuple[int, bool]] = [(start, False)]
+    seen = {start}
+
+    current, flipped = start, False
+    while True:
+        # Within one carriageway, "further right" is right_of; once flipped, the
+        # group's rightward direction is that lanelet's own left.
+        following = (relations.left_of if flipped else relations.right_of).get(current)
+        if following is None:
+            # Step across to the opposing carriageway, if there is one.
+            following = relations.opposing_of.get(current)
+            if following is None or following in seen:
+                return out
+            flipped = not flipped
+        if following in seen:
+            return out
+        seen.add(following)
+        out.append((following, flipped))
+        current = following
+
+
+def _leftmost(relations: Relations, index: int) -> tuple[int, bool]:
+    """Walk left from `index` to the edge of its cross-section."""
+    current, flipped = index, False
+    seen = {index}
+    while True:
+        preceding = (relations.right_of if flipped else relations.left_of).get(current)
+        if preceding is None:
+            preceding = relations.opposing_of.get(current)
+            if preceding is None or preceding in seen:
+                return current, flipped
+            # Crossing the centre line flips the sense of left and right.
+            flipped = not flipped
+        if preceding in seen:
+            return current, flipped
+        seen.add(preceding)
+        current = preceding
 
 
 def _build_groups(lanelets: list[LaneletIR], relations: Relations, network: Network) -> None:
     assigned: set[int] = set()
 
-    def leftmost(index: int) -> int:
-        seen = {index}
-        current = index
-        while True:
-            left = relations.left_of.get(current)
-            if left is None or left in seen:
-                return current
-            pair = (min(current, left), max(current, left))
-            if pair in relations.antiparallel:
-                return current
-            seen.add(left)
-            current = left
-
     for index in range(len(lanelets)):
         if index in assigned:
             continue
-        start = leftmost(index)
+        start, start_flipped = _leftmost(relations, index)
         if start in assigned:
             continue
 
-        members: list[int] = []
-        current: int | None = start
-        while current is not None and current not in assigned:
-            members.append(current)
-            assigned.add(current)
-            current = _same_direction_neighbour(relations, current)
+        walk = [
+            (member, flipped)
+            for member, flipped in _neighbour_chain(relations, start)
+            if member not in assigned
+        ]
+        if not walk:
+            continue
 
-        group = LaneGroup(members)
+        # Either direction is a valid s-axis for a two-way road, so the only
+        # thing that matters is picking one deterministically: the direction of
+        # the lanelet that seeded this group, which is the first in IR order not
+        # already claimed. `start_flipped` says whether the walk's origin faces
+        # the other way, so subtracting it re-expresses every flag in the
+        # seed's terms.
+        forward_flip = start_flipped
+        members = [member for member, _ in walk]
+        flags = [flipped != forward_flip for _, flipped in walk]
+
+        for member in members:
+            assigned.add(member)
+
+        group = LaneGroup(members, flags)
         network.group_of.update({member: len(network.groups) for member in members})
         network.groups.append(group)
 
@@ -134,9 +185,17 @@ def _next_group(relations: Relations, network: Network, group_index: int) -> int
     # A member with no successor is a lane that simply ends -- a lane drop, which
     # is a lane-section change, not a branch. A member with several is a genuine
     # branch and belongs to a junction.
+    # For a member travelling against the group, "onward along the road" is its
+    # *predecessor*: it drives towards the road's start, not away from it.
+    def onward(member: int, reversed_: bool) -> list[int]:
+        return relations.predecessor_of(member) if reversed_ else relations.successor_of(member)
+
+    def backward(member: int, reversed_: bool) -> list[int]:
+        return relations.successor_of(member) if reversed_ else relations.predecessor_of(member)
+
     successors: list[int] = []
-    for member in group.members:
-        following = relations.successor_of(member)
+    for position, member in enumerate(group.members):
+        following = onward(member, group.reversed_[position])
         if len(following) > 1:
             return None
         successors.extend(following)
@@ -160,12 +219,23 @@ def _next_group(relations: Relations, network: Network, group_index: int) -> int
 
     # Nothing outside this group may feed the target, or the join is a merge and
     # belongs in a junction rather than inside one road.
-    for member in target.members:
-        preceding = relations.predecessor_of(member)
+    for position, member in enumerate(target.members):
+        preceding = backward(member, target.reversed_[position])
         if len(preceding) > 1:
             return None
         if preceding and network.group_of.get(preceding[0]) != group_index:
             return None
+
+    # A two-way road must keep facing the same way along its whole length, or the
+    # lane signs would flip mid-road.
+    if group.two_way or target.two_way:
+        carried_flags = {
+            member: group.reversed_[group.members.index(member)] for member in group.members
+        }
+        for position, member in enumerate(target.members):
+            source = backward(member, target.reversed_[position])
+            if source and carried_flags.get(source[0]) not in (None, target.reversed_[position]):
+                return None
 
     return candidate
 

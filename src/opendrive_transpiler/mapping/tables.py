@@ -51,12 +51,19 @@ NON_DRIVABLE_SUBTYPES = frozenset(
 )
 
 
-def lane_type_for(subtype: str) -> tuple[str, bool]:
-    """Returns the OpenDRIVE lane type and whether the subtype was recognised."""
+def lane_type_for(subtype: str, *, one_way: bool = True) -> tuple[str, bool]:
+    """Returns the OpenDRIVE lane type and whether the subtype was recognised.
+
+    A lanelet tagged `one_way=no` is drivable in both directions, which OpenDRIVE
+    spells `bidirectional` -- a distinct lane type rather than a modifier, so it
+    replaces the driving type instead of qualifying it.
+    """
     key = (subtype or "").strip().lower()
-    if key in LANE_TYPE_BY_SUBTYPE:
-        return LANE_TYPE_BY_SUBTYPE[key], True
-    return DEFAULT_LANE_TYPE, False
+    recognised = key in LANE_TYPE_BY_SUBTYPE
+    lane_type = LANE_TYPE_BY_SUBTYPE[key] if recognised else DEFAULT_LANE_TYPE
+    if not one_way and lane_type == "driving":
+        return "bidirectional", recognised
+    return lane_type, recognised
 
 
 # --------------------------------------------------------------------------

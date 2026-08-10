@@ -30,6 +30,7 @@ def convert(fixture_path: Path, tmp_path: Path) -> ET.Element:
 
 CONVERTIBLE = [
     "minimal",
+    "two_way",
     "chain",
     "parallel_lanes",
     "curved_road",
@@ -164,6 +165,52 @@ def test_elevation_is_carried_through(tmp_path: Path):
     elevations = root.findall("road/elevationProfile/elevation")
     assert len(elevations) > 1
     assert max(float(e.get("a")) for e in elevations) > 5.0
+
+
+def test_a_two_way_road_puts_the_directions_on_opposite_sides(tmp_path: Path):
+    """One road, one lane each way, straddling a reference line on the centre."""
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    root = convert(fixtures / "two_way.py", tmp_path)
+
+    roads = root.findall("road")
+    assert len(roads) == 1, "a two-way road is one road, not two"
+
+    section = roads[0].find("lanes/laneSection")
+    left = [int(lane.get("id")) for lane in section.findall("left/lane")]
+    right = [int(lane.get("id")) for lane in section.findall("right/lane")]
+    assert left == [1]
+    assert right == [-1]
+
+    # Both carriageways are the same width, and the reference line sits between
+    # them -- on the shared centre, at y = 0.
+    widths = [
+        float(width.get("a"))
+        for lane in section.findall("left/lane") + section.findall("right/lane")
+        for width in lane.findall("width")
+    ]
+    assert all(math.isclose(w, 3.5, abs_tol=1e-9) for w in widths)
+
+    geometry = roads[0].find("planView/geometry")
+    assert math.isclose(float(geometry.get("y")), 0.0, abs_tol=1e-9)
+
+
+def test_a_bidirectional_lanelet_gets_the_bidirectional_lane_type(tmp_path: Path):
+    """`one_way=no` is a lane type in OpenDRIVE, not a modifier on driving."""
+    from opendrive_transpiler import transpile_source
+
+    source = (
+        "from lanelet2.core import Lanelet, LineString3d, Point3d, getId\n"
+        "a = LineString3d(getId(), [Point3d(getId(), 0.0, 2.0, 0.0), "
+        "Point3d(getId(), 40.0, 2.0, 0.0)])\n"
+        "b = LineString3d(getId(), [Point3d(getId(), 0.0, -2.0, 0.0), "
+        "Point3d(getId(), 40.0, -2.0, 0.0)])\n"
+        "ll = Lanelet(getId(), a, b)\n"
+        "ll.attributes['subtype'] = 'road'\n"
+        "ll.attributes['one_way'] = 'no'\n"
+    )
+    result = transpile_source(source, "bidi.py", options=TranspileOptions(strict=False))
+    assert "xodr.LaneType.bidirectional" in result.code
+    assert any(d.code == "LL2ODR-I907" for d in result.diagnostics)
 
 
 def test_a_script_that_loads_from_disk_is_refused(tmp_path: Path):

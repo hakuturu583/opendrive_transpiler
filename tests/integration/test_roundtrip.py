@@ -33,7 +33,7 @@ pytestmark = needs_emit
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
-EXACT = ["minimal", "chain", "parallel_lanes", "curved_road", "branch"]
+EXACT = ["minimal", "chain", "parallel_lanes", "curved_road", "branch", "two_way"]
 
 
 def reconstruct(road: ET.Element) -> list[tuple[float, float]]:

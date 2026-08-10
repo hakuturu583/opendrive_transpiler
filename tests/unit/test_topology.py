@@ -178,3 +178,88 @@ ll = Lanelet(getId(), LineString3d(getId(), [Point3d(getId(), 0.0, 1.0, 0.0),
     )
     assert len(net.chains) == 1
     assert net.chains[0].lanelet_indices == [0]
+
+
+# --------------------------------------------------------------------------
+# Direction: geometry, not traversal order
+# --------------------------------------------------------------------------
+
+TWO_WAY = """
+centre = [Point3d(getId(), i * 20.0, 0.0, 0.0) for i in range(3)]
+south = [Point3d(getId(), i * 20.0, -3.5, 0.0) for i in range(3)]
+north = [Point3d(getId(), i * 20.0, 3.5, 0.0) for i in range(3)]
+shared = LineString3d(getId(), centre)
+# Each lanelet has the centre on ITS OWN left, so both use it as leftBound --
+# one of them reversed. This is what a real two-way road looks like.
+east = Lanelet(getId(), shared, LineString3d(getId(), south))
+west = Lanelet(getId(), shared.invert(), LineString3d(getId(), list(reversed(north))))
+east.attributes['subtype'] = 'road'
+west.attributes['subtype'] = 'road'
+"""
+
+MALFORMED = """
+top = [Point3d(getId(), i * 20.0, 3.5, 0.0) for i in range(3)]
+mid = [Point3d(getId(), i * 20.0, 0.0, 0.0) for i in range(3)]
+bot = [Point3d(getId(), i * 20.0, -3.5, 0.0) for i in range(3)]
+shared = LineString3d(getId(), mid)
+a = Lanelet(getId(), LineString3d(getId(), top), shared)
+# Left bound runs -x while the right bound runs +x: the lanelet contradicts itself.
+b = Lanelet(getId(), shared.invert(), LineString3d(getId(), bot))
+a.attributes['subtype'] = 'road'
+b.attributes['subtype'] = 'road'
+"""
+
+
+def test_a_two_way_pair_becomes_one_cross_section():
+    """The shared centre is the LEFT bound of both, so left-to-left must match."""
+    _ir, _index, rels, net = analyse(TWO_WAY)
+    assert sorted(rels.opposing) == [(0, 1)]
+    assert len(net.groups) == 1, "a two-way road is one cross-section, not two"
+    # Exactly one of the two travels against the group's forward direction.
+    assert sum(net.groups[0].reversed_) == 1
+    assert net.groups[0].two_way
+
+
+def test_same_direction_lanes_are_not_called_opposing():
+    """The regression guard: SIDE_BY_SIDE must stay a plain two-lane road."""
+    _ir, _index, rels, net = analyse(SIDE_BY_SIDE)
+    assert rels.opposing == set()
+    assert [g.members for g in net.groups] == [[0, 1], [2, 3]]
+    assert not any(g.two_way for g in net.groups)
+
+
+def test_travel_direction_averages_both_bounds():
+    """Neither bound alone decides; a well-formed lanelet's bounds agree."""
+    ir, _index, _rels, _net = analyse(TWO_WAY)
+    east, west = ir.lanelets
+    assert relations.travel_direction(east)[0] > 0.9
+    assert relations.travel_direction(west)[0] < -0.9
+
+
+def test_a_lanelet_whose_bounds_disagree_is_detected():
+    """Its two edges claim opposite directions, so it says nothing about travel."""
+    ir, _index, _rels, _net = analyse(MALFORMED)
+    disagree = [relations.bounds_disagree(lanelet) for lanelet in ir.lanelets]
+    assert disagree.count(True) == 1
+
+
+def test_direction_survives_a_reversed_shared_boundary_on_a_curve():
+    """A curved two-way pair must still be recognised, not just an axis-aligned one."""
+    _ir, _index, rels, net = analyse(
+        """
+import math
+inner, outer, mid = [], [], []
+for step in range(7):
+    angle = math.radians(90.0 * step / 6)
+    mid.append(Point3d(getId(), 40.0 * math.cos(angle), 40.0 * math.sin(angle), 0.0))
+    inner.append(Point3d(getId(), 36.5 * math.cos(angle), 36.5 * math.sin(angle), 0.0))
+    outer.append(Point3d(getId(), 43.5 * math.cos(angle), 43.5 * math.sin(angle), 0.0))
+shared = LineString3d(getId(), mid)
+a = Lanelet(getId(), shared, LineString3d(getId(), inner))
+b = Lanelet(getId(), shared.invert(), LineString3d(getId(), list(reversed(outer))))
+a.attributes['subtype'] = 'road'
+b.attributes['subtype'] = 'road'
+"""
+    )
+    assert sorted(rels.opposing) == [(0, 1)]
+    assert len(net.groups) == 1

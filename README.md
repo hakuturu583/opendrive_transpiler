@@ -154,6 +154,18 @@ chain stops only where the correspondence becomes ambiguous — a branch or a me
 — and those become a `<junction>` whose connecting roads are the branch lanelets
 themselves, carrying their own exact geometry rather than a synthesized arc.
 
+**Direction is measured, not read off the data structure.** A lanelet names its
+bounds relative to its own direction of travel, so on a two-way road the shared
+centre line is the **left** bound of *both* lanelets — each driver has the centre
+on their left — stored in opposite order. Adjacency is therefore matched across
+all four bound pairings, and direction comes from averaging a lanelet's two
+bounds rather than from which one matched or which way it was stored. Traversal
+order is a storage detail; direction is geometry. A two-way pair becomes one road
+whose reference line follows the shared boundary, so the two directions land on
+opposite sides of it as `+1`/`-1` — which is exactly what an OpenDRIVE left lane
+means. That overrides `--reference-line`, because no other choice puts traffic on
+the correct side.
+
 **Nothing is dropped silently.** Every feature that is recognised but not
 converted emits a diagnostic naming it, and the same list is repeated in the
 generated file's header. A half-converted HD map that looks complete is worse
@@ -188,7 +200,6 @@ things and the difference matters when planning around it.
 |---|---|---|
 | Junction `<priority>` from `RightOfWay` / `AllWayStop` | `LL2ODR-I905` | **Blocked by the backend.** `scenariogeneration` does not model `<priority>` at all, so it cannot be emitted without patching it or writing XML directly. |
 | Geocentric `<geoReference>` | `LL2ODR-I906` | **No equivalent exists.** Geocentric coordinates are earth-centred XYZ; there is no planar PROJ string that means the same thing. |
-| Two-way lanelets as `+`/`-` lanes | `LL2ODR-I907` | Not done. Opposing lanes are emitted as separate roads, which is valid but coarser. Needs the antiparallel-neighbour detection extended and the group ordering made direction-aware. |
 | `<spiral>` fitting | — | Not done. Fitting a clothoid to a polyline is a genuinely harder problem than arcs or cubics; `--fit=arc` and `--fit=parampoly3` cover the continuity case. |
 | `load()` / `loadRobust()` from an `.osm` | `LL2ODR-E402` | Not done, and it would change what this tool is: it converts maps a script *builds*, so reading one would mean adding an OSM parser and full inverse projections. |
 | `class`, `match`, generators, real exception unwinding, seeded `random` | `LL2ODR-E201` / `E202` | Not done. Map-building scripts do not use these; each is reported with its source location rather than silently mishandled. |
@@ -308,12 +319,13 @@ build a map and then run dozens of queries; we want the map.
 - [x] Cubic (`c`, `d` ≠ 0) width and elevation fitting (`--cubic-profiles`)
 - [x] `<laneOffset>` where the reference line is not a boundary
 - [x] `<superelevation>` from the height difference across the cross-section
+- [x] Two-way roads: both directions in one road, reference line on the shared centre
 - [x] `<junction>` / `<connection>` with the branch lanelets as connecting roads
 - [x] `<signal>` from `TrafficLight` / `TrafficSign` / `SpeedLimit`
 - [x] `<object>` outlines from `Area` (including holes) and standalone `Polygon`
 - [x] Lane-count changes as lane sections of differing width, linked lane by lane
 - [ ] `<spiral>` planView fitting
-- [ ] Left lanes (`+1, +2, …`) for opposing traffic (`LL2ODR-I907`)
+- [x] Left lanes (`+1, +2, …`) for opposing traffic; `one_way=no` → `bidirectional`
 - [ ] Junction `<priority>` (`LL2ODR-I905`) — not modelled by the backend
 - [ ] Road `<shape>`; guard rails and crosswalk markings as objects
 
