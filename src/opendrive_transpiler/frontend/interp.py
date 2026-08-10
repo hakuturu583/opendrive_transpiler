@@ -62,13 +62,16 @@ from .shadow import (
     UNKNOWN,
     AttributeMap,
     BasicPoint,
+    BoundingBox,
     GPSPoint,
     LineStringStorage,
     OpaqueValue,
     Origin,
     ProjectionInfo,
     ShadowArea,
+    ShadowCompound,
     ShadowLanelet,
+    ShadowLaneletSequence,
     ShadowLaneletWithStopLine,
     ShadowLayer,
     ShadowLineString,
@@ -217,6 +220,20 @@ _SHADOW_ATTRS: dict[type, frozenset[str]] = {
             "allWayStop",
         }
     ),
+    ShadowCompound: frozenset({"ids", "lineStrings", "numSegments", "invert", "inverted"}),
+    ShadowLaneletSequence: frozenset(
+        {
+            "lanelets",
+            "leftBound",
+            "rightBound",
+            "centerline",
+            "invert",
+            "inverted",
+            "polygon2d",
+            "polygon3d",
+        }
+    ),
+    BoundingBox: frozenset({"min", "max"}),
     ShadowArea: frozenset(
         {
             "id",
@@ -1067,8 +1084,10 @@ class Interpreter:
                 self.span(node),
             )
             return None
-        if isinstance(iterable, ShadowLineString):
+        if isinstance(iterable, (ShadowLineString, ShadowCompound)):
             return iterable.points
+        if isinstance(iterable, ShadowLaneletSequence):
+            return iterable.lanelets()
         if isinstance(iterable, (ShadowLayer, ShadowMap)):
             return list(iterable) if isinstance(iterable, ShadowLayer) else []
         try:
@@ -1169,8 +1188,32 @@ class Interpreter:
         if isinstance(owner, ShadowLayer):
             return BoundShadowMethod(owner, name)
 
+        if isinstance(owner, (ShadowCompound, ShadowLaneletSequence)):
+            if name in {"leftBound", "rightBound"}:
+                return getattr(owner, name)
+            if name == "centerline":
+                return compute_centerline(owner.leftBound, owner.rightBound)
+            return BoundShadowMethod(owner, name)
+
+        if isinstance(owner, BoundingBox):
+            return getattr(owner, name, UNKNOWN)
+
         if isinstance(owner, ProjectionInfo):
             return BoundShadowMethod(owner, name)
+
+        if isinstance(owner, (ShadowCompound, ShadowLaneletSequence)):
+            if name == "invert":
+                return owner.invert()
+            if name == "inverted":
+                return owner.inverted()
+            if name in {"ids", "lineStrings", "numSegments", "lanelets"}:
+                return getattr(owner, name)()
+            if name in {"polygon2d", "polygon3d"} and isinstance(owner, ShadowLaneletSequence):
+                left = owner.leftBound.points
+                right = list(reversed(owner.rightBound.points))
+                storage = LineStringStorage(points=[*left, *right])
+                return ShadowLineString(storage, dim=3 if name == "polygon3d" else 2, polygon=True)
+            return UNKNOWN
 
         if isinstance(owner, ShadowPoint) and name == "basicPoint":
             return BoundShadowMethod(owner, name)
@@ -1378,6 +1421,20 @@ class Interpreter:
                 return [self._ring_polygon(ring) for ring in owner.inners]
             return UNKNOWN
 
+        if isinstance(owner, (ShadowCompound, ShadowLaneletSequence)):
+            if name == "invert":
+                return owner.invert()
+            if name == "inverted":
+                return owner.inverted()
+            if name in {"ids", "lineStrings", "numSegments", "lanelets"}:
+                return getattr(owner, name)()
+            if name in {"polygon2d", "polygon3d"} and isinstance(owner, ShadowLaneletSequence):
+                left = owner.leftBound.points
+                right = list(reversed(owner.rightBound.points))
+                storage = LineStringStorage(points=[*left, *right])
+                return ShadowLineString(storage, dim=3 if name == "polygon3d" else 2, polygon=True)
+            return UNKNOWN
+
         if isinstance(owner, ShadowPoint) and name == "basicPoint":
             return BasicPoint(owner.x, owner.y, owner.z, owner.dim)
 
@@ -1396,8 +1453,13 @@ class Interpreter:
                 return owner.get(positional[0])
             if name == "uniqueId":
                 return self.registry.get_id()
-            if name in {"search", "nearest", "findUsages"}:
-                return []
+            if name == "search" and positional:
+                return _layer_search(owner, positional[0])
+            if name == "nearest" and positional:
+                count = int(positional[1]) if len(positional) > 1 else 1
+                return _layer_nearest(owner, positional[0], count)
+            if name == "findUsages" and positional:
+                return _layer_find_usages(owner, positional[0])
             return UNKNOWN
 
         if isinstance(owner, ProjectionInfo):
@@ -1445,6 +1507,88 @@ class Interpreter:
                 if not points or points[-1] is not point:
                     points.append(point)
         return ShadowLineString(LineStringStorage(points=points), dim=3, polygon=True)
+
+
+def _primitive_points(value: Any) -> list[ShadowPoint]:
+    if isinstance(value, ShadowPoint):
+        return [value]
+    if isinstance(value, (ShadowLineString, ShadowCompound)):
+        return list(value.points)
+    if isinstance(value, ShadowLanelet):
+        return [
+            *(value.left.points if value.left else []),
+            *(value.right.points if value.right else []),
+        ]
+    if isinstance(value, ShadowArea):
+        return [p for bound in value.outer for p in bound.points]
+    return []
+
+
+def _layer_search(layer: ShadowLayer, box: Any) -> list[Any]:
+    """Everything in the layer with a point inside the bounding box."""
+    if not isinstance(box, BoundingBox):
+        return []
+    return [
+        item
+        for item in layer.items
+        if any(box.contains(point.xyz) for point in _primitive_points(item))
+    ]
+
+
+def _layer_nearest(layer: ShadowLayer, target: Any, count: int) -> list[Any]:
+    if isinstance(target, ShadowPoint):
+        anchor = target.xy
+    elif isinstance(target, BasicPoint):
+        anchor = (target.x, target.y)
+    else:
+        return []
+
+    def distance(item: Any) -> float:
+        points = _primitive_points(item)
+        if not points:
+            return float("inf")
+        return min((p.x - anchor[0]) ** 2 + (p.y - anchor[1]) ** 2 for p in points)
+
+    return sorted(layer.items, key=distance)[: max(count, 0)]
+
+
+def _layer_find_usages(layer: ShadowLayer, value: Any) -> list[Any]:
+    """Layer members that *use* `value`, by storage identity.
+
+    Usage is structural, not spatial: a lanelet uses a line string when that line
+    string is one of its bounds, not merely when the two happen to share a point.
+    Two consecutive lanelets share their joint points, so a looser test would
+    report the neighbour as a user of a boundary it has never seen.
+    """
+    out: list[Any] = []
+
+    if isinstance(value, ShadowLineString):
+        target = value.storage
+
+        def uses_bound(item: Any) -> bool:
+            if isinstance(item, ShadowLanelet):
+                return any(
+                    bound is not None and bound.storage is target
+                    for bound in (item.left, item.right)
+                )
+            if isinstance(item, ShadowArea):
+                return any(
+                    bound.storage is target for ring in [item.outer, *item.inners] for bound in ring
+                )
+            return False
+
+        return [item for item in layer.items if uses_bound(item)]
+
+    if isinstance(value, ShadowPoint):
+        target = value.storage
+        for item in layer.items:
+            if isinstance(item, ShadowLineString) and any(
+                point.storage is target for point in item.storage.points
+            ):
+                out.append(item)
+        return out
+
+    return out
 
 
 def execute(

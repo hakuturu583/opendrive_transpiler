@@ -632,3 +632,120 @@ class OpaqueValue:
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<{self.kind}>"
+
+
+@dataclass(eq=False)
+class BoundingBox:
+    """`BoundingBox2d`/`BoundingBox3d` -- a min/max corner pair."""
+
+    min: BasicPoint = field(default_factory=BasicPoint)
+    max: BasicPoint = field(default_factory=BasicPoint)
+    dim: int = 2
+
+    def contains(self, point: tuple[float, float, float]) -> bool:
+        if not (self.min.x <= point[0] <= self.max.x):
+            return False
+        if not (self.min.y <= point[1] <= self.max.y):
+            return False
+        return not (self.dim == 3 and not (self.min.z <= point[2] <= self.max.z))
+
+
+@dataclass(eq=False)
+class ShadowCompound:
+    """`CompoundLineString*` / `CompoundPolygon*` -- several line strings read as one.
+
+    A view, not a copy: the members keep their own identity, which is what
+    `lineStrings()` hands back and what topology would still match on.
+    """
+
+    members: list[ShadowLineString] = field(default_factory=list)
+    dim: int = 3
+    hybrid: bool = False
+    polygon: bool = False
+    inverted_view: bool = False
+
+    @property
+    def points(self) -> list[ShadowPoint]:
+        """Members chained end to start, with the shared joints collapsed."""
+        out: list[ShadowPoint] = []
+        members = list(reversed(self.members)) if self.inverted_view else self.members
+        for member in members:
+            for point in member.points:
+                if not out or out[-1].storage is not point.storage:
+                    out.append(point)
+        return out
+
+    def __len__(self) -> int:
+        return len(self.points)
+
+    def __iter__(self) -> Iterator[ShadowPoint]:
+        return iter(self.points)
+
+    def __getitem__(self, index: Any) -> Any:
+        return self.points[index]
+
+    def ids(self) -> list[int]:
+        return [member.id for member in self.members]
+
+    def lineStrings(self) -> list[ShadowLineString]:
+        return list(self.members)
+
+    def numSegments(self) -> int:
+        return max(len(self.points) - 1, 0)
+
+    def invert(self) -> ShadowCompound:
+        return ShadowCompound(
+            members=self.members,
+            dim=self.dim,
+            hybrid=self.hybrid,
+            polygon=self.polygon,
+            inverted_view=not self.inverted_view,
+        )
+
+    def inverted(self) -> bool:
+        return self.inverted_view
+
+
+@dataclass(eq=False)
+class ShadowLaneletSequence:
+    """`LaneletSequence` -- a run of lanelets read as one long lanelet."""
+
+    members: list[ShadowLanelet] = field(default_factory=list)
+    inverted_view: bool = False
+
+    def _ordered(self) -> list[ShadowLanelet]:
+        return list(reversed(self.members)) if self.inverted_view else self.members
+
+    def _chain(self, side: str) -> ShadowLineString:
+        points: list[ShadowPoint] = []
+        for lanelet in self._ordered():
+            bound = getattr(lanelet, side)
+            if bound is None:
+                continue
+            for point in bound.points:
+                if not points or points[-1].storage is not point.storage:
+                    points.append(point)
+        return ShadowLineString(LineStringStorage(points=points))
+
+    @property
+    def leftBound(self) -> ShadowLineString:
+        return self._chain("left")
+
+    @property
+    def rightBound(self) -> ShadowLineString:
+        return self._chain("right")
+
+    def lanelets(self) -> list[ShadowLanelet]:
+        return self._ordered()
+
+    def invert(self) -> ShadowLaneletSequence:
+        return ShadowLaneletSequence(self.members, not self.inverted_view)
+
+    def inverted(self) -> bool:
+        return self.inverted_view
+
+    def __len__(self) -> int:
+        return len(self.members)
+
+    def __iter__(self) -> Iterator[ShadowLanelet]:
+        return iter(self._ordered())

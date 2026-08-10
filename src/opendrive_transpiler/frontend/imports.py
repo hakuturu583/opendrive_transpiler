@@ -30,6 +30,7 @@ from .shadow import (
     UNKNOWN,
     AttributeMap,
     BasicPoint,
+    BoundingBox,
     GPSPoint,
     LineStringStorage,
     OpaqueValue,
@@ -37,7 +38,9 @@ from .shadow import (
     PointStorage,
     ProjectionInfo,
     ShadowArea,
+    ShadowCompound,
     ShadowLanelet,
+    ShadowLaneletSequence,
     ShadowLaneletWithStopLine,
     ShadowLineString,
     ShadowMap,
@@ -213,6 +216,25 @@ class Registry:
         for kind, submap in (("Map", False), ("Submap", True)):
             for what in ("Points", "LineStrings", "Polygons", "Lanelets", "Areas"):
                 t[f"{core}create{kind}From{what}"] = self._create_map_ctor(submap)
+
+        # Compound views and sequences -------------------------------------
+        for name, dim, hybrid, polygon in (
+            ("CompoundLineString3d", 3, False, False),
+            ("CompoundLineString2d", 2, False, False),
+            ("CompoundHybridLineString3d", 3, True, False),
+            ("CompoundHybridLineString2d", 2, True, False),
+            ("CompoundPolygon3d", 3, False, True),
+            ("CompoundPolygon2d", 2, False, True),
+            ("CompoundHybridPolygon3d", 3, True, True),
+            ("CompoundHybridPolygon2d", 2, True, True),
+        ):
+            t[core + name] = self._compound_ctor(dim, hybrid, polygon)
+
+        t[core + "LaneletSequence"] = self._sequence_ctor
+
+        for name, dim in (("BoundingBox2d", 2), ("BoundingBox3d", 3)):
+            t[core + name] = self._bounding_box_ctor(dim)
+        t[core + "Vector2d"] = self._not_instantiable("Vector2d")
 
         t[core + "getId"] = lambda a, s: self.get_id()
         t[core + "registerId"] = lambda a, s: self.register_id(_as_int(a.get(0, "id")))
@@ -428,6 +450,35 @@ class Registry:
             )
             self.regelems.append(regelem)
             return regelem
+
+        return ctor
+
+    def _compound_ctor(self, dim: int, hybrid: bool, polygon: bool):
+        def ctor(args: Args, span: SourceSpan) -> Any:
+            members = [
+                value
+                for value in _as_list(args.get(0, "lineStrings", "values"))
+                if isinstance(value, ShadowLineString)
+            ]
+            return ShadowCompound(members=members, dim=dim, hybrid=hybrid, polygon=polygon)
+
+        return ctor
+
+    def _sequence_ctor(self, args: Args, span: SourceSpan) -> Any:
+        members = [
+            value for value in _as_list(args.get(0, "lanelets")) if isinstance(value, ShadowLanelet)
+        ]
+        return ShadowLaneletSequence(members=members)
+
+    def _bounding_box_ctor(self, dim: int):
+        def ctor(args: Args, span: SourceSpan) -> Any:
+            lower = args.get(0, "min")
+            upper = args.get(1, "max")
+            return BoundingBox(
+                min=lower if isinstance(lower, BasicPoint) else BasicPoint(dim=dim),
+                max=upper if isinstance(upper, BasicPoint) else BasicPoint(dim=dim),
+                dim=dim,
+            )
 
         return ctor
 

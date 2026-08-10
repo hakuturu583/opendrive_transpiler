@@ -10,7 +10,7 @@ import pytest
 
 from opendrive_transpiler.config import TranspileOptions
 from opendrive_transpiler.diagnostics import DiagnosticBag, Severity, TranspileError
-from opendrive_transpiler.frontend.interp import execute
+from opendrive_transpiler.frontend.interp import Interpreter, execute
 from opendrive_transpiler.frontend.loader import parse_source
 from opendrive_transpiler.ir.model import build_ir
 
@@ -464,3 +464,93 @@ def test_a_lanelet_bound_is_not_mistaken_for_a_polygon():
         strict=False,
     )
     assert ir.polygons == []
+
+
+# --------------------------------------------------------------------------
+# Compound views, sequences and layer queries
+# --------------------------------------------------------------------------
+
+CHAIN_OF_THREE = (
+    "up = [Point3d(getId(), i * 10.0, 1.0, 0.0) for i in range(4)]\n"
+    "down = [Point3d(getId(), i * 10.0, -1.0, 0.0) for i in range(4)]\n"
+    "lls = []\n"
+    "for i in range(3):\n"
+    "    ll = Lanelet(getId(), LineString3d(getId(), [up[i], up[i + 1]]),\n"
+    "                 LineString3d(getId(), [down[i], down[i + 1]]))\n"
+    "    ll.attributes['subtype'] = 'road'\n"
+    "    lls.append(ll)\n"
+)
+
+
+def evaluate(body: str, name: str):
+    """Run a snippet and read one of its module-level variables back."""
+    options = TranspileOptions(strict=True)
+    bag = DiagnosticBag(strict=True)
+    module = parse_source(PRELUDE + body, "<test>", bag)
+    interpreter = Interpreter("<test>", bag, options)
+    interpreter.run(module)
+    found, value = interpreter.globals.lookup(name)
+    assert found, f"{name!r} was never bound"
+    return value, bag
+
+
+def test_compound_line_string_chains_members_without_repeating_joints():
+    value, bag = evaluate(
+        CHAIN_OF_THREE + "from lanelet2.core import CompoundLineString3d\n"
+        "c = CompoundLineString3d([ll.leftBound for ll in lls])\n"
+        "probe = [len(c), c.numSegments(), len(c.lineStrings()), len(c.ids())]\n",
+        "probe",
+    )
+    # Three two-point line strings sharing their joints: four points, three segments.
+    assert value == [4, 3, 3, 3]
+    assert not bag.errors
+
+
+def test_lanelet_sequence_reads_as_one_long_lanelet():
+    value, _ = evaluate(
+        CHAIN_OF_THREE + "from lanelet2.core import LaneletSequence\n"
+        "s = LaneletSequence(lls)\n"
+        "probe = [len(s.lanelets()), len(s.leftBound), len(s.rightBound), s.inverted()]\n",
+        "probe",
+    )
+    assert value == [3, 4, 4, False]
+
+
+def test_layer_search_returns_what_is_inside_the_box():
+    value, _ = evaluate(
+        CHAIN_OF_THREE
+        + "from lanelet2.core import BasicPoint2d, BoundingBox2d, createMapFromLanelets\n"
+        "m = createMapFromLanelets(lls)\n"
+        "box = BoundingBox2d(BasicPoint2d(-1.0, -2.0), BasicPoint2d(11.0, 2.0))\n"
+        "probe = len(m.pointLayer.search(box))\n",
+        "probe",
+    )
+    assert value == 4  # x in {0, 10} on both sides
+
+
+def test_layer_nearest_returns_the_requested_count_in_order():
+    value, _ = evaluate(
+        CHAIN_OF_THREE + "from lanelet2.core import BasicPoint2d, createMapFromLanelets\n"
+        "m = createMapFromLanelets(lls)\n"
+        "near = m.pointLayer.nearest(BasicPoint2d(0.0, 0.0), 2)\n"
+        "probe = [len(near), round(near[0].x, 6)]\n",
+        "probe",
+    )
+    assert value == [2, 0.0]
+
+
+def test_find_usages_is_structural_not_spatial():
+    """Consecutive lanelets share joint points but not boundaries."""
+    value, _ = evaluate(
+        CHAIN_OF_THREE + "from lanelet2.core import createMapFromLanelets\n"
+        "m = createMapFromLanelets(lls)\n"
+        "probe = len(m.laneletLayer.findUsages(lls[0].leftBound))\n",
+        "probe",
+    )
+    assert value == 1
+
+
+def test_vector2d_refuses_construction_as_lanelet2_does():
+    with pytest.raises(TranspileError) as excinfo:
+        run("from lanelet2.core import Vector2d\nv = Vector2d()\n")
+    assert excinfo.value.diagnostic.code == "LL2ODR-E303"
