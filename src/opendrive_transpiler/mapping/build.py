@@ -22,8 +22,11 @@ from itertools import pairwise
 
 from ..config import TranspileOptions
 from ..diagnostics import (
+    I_AREA_SKIPPED,
     I_GEO_REFERENCE,
     I_JUNCTION_SKIPPED,
+    I_POLYGON_SKIPPED,
+    I_REGELEM_SKIPPED,
     I_TWO_WAY,
     W_BAD_SPEED_LIMIT,
     W_BOUNDS_SWAPPED,
@@ -35,7 +38,13 @@ from ..diagnostics import (
     DiagnosticBag,
 )
 from ..geometry.fit import build_plan_view, merge_collinear, signed_side
-from ..geometry.polyline import dedupe, sample_stations, station_of_point, total_length
+from ..geometry.polyline import (
+    dedupe,
+    point_at_station,
+    sample_stations,
+    station_of_point,
+    total_length,
+)
 from ..geometry.profile import (
     build_profile,
     lane_widths,
@@ -56,18 +65,13 @@ from ..odr.model import (
 )
 from ..topology import grouping, relations
 from ..topology.index import NodeIndex
-from . import junctions, tables
+from . import furniture, junctions, tables
 
 
 def build_model(
     ir: MapIR, bag: DiagnosticBag, options: TranspileOptions
 ) -> tuple[OdrModel, TranspileStats]:
-    stats = TranspileStats(
-        lanelets_in=len(ir.lanelets),
-        areas_skipped=len(ir.areas),
-        polygons_skipped=len(ir.polygons),
-        regelems_skipped=len(ir.regelems),
-    )
+    stats = TranspileStats(lanelets_in=len(ir.lanelets))
     model = OdrModel(
         name=options.name or ir.source_name,
         rev_major=options.revision[0],
@@ -97,6 +101,8 @@ def build_model(
 
     _link_roads(network, rels, roads, bag)
 
+    _attach_furniture(builder, roads, ir, options)
+
     if options.junctions:
         model.junctions = junctions.build(network, rels, roads, ir, bag)
         stats.junctions = len(model.junctions)
@@ -109,9 +115,98 @@ def build_model(
         stats.lane_sections += len(road.lane_sections)
         stats.lanes += sum(len(section.lanes) for section in road.lane_sections)
         stats.lanelets_converted += len(road.lanelet2_ids)
+        stats.signals += len(road.signals)
+        stats.objects += len(road.objects)
 
     stats.lanelets_skipped = stats.lanelets_in - stats.lanelets_converted
+    _report_furniture(model, ir, stats, bag, options)
     return model, stats
+
+
+def _report_furniture(
+    model: OdrModel,
+    ir: MapIR,
+    stats: TranspileStats,
+    bag: DiagnosticBag,
+    options: TranspileOptions,
+) -> None:
+    """Say what reached the output and what did not, now that it is known."""
+    emitted = [obj for road in model.roads for obj in road.objects]
+    areas_out = sum(1 for obj in emitted if obj.source == "Area")
+    polygons_out = sum(1 for obj in emitted if obj.source == "Polygon")
+    stats.areas_skipped = len(ir.areas) - areas_out
+    stats.polygons_skipped = len(ir.polygons) - polygons_out
+
+    if stats.areas_skipped:
+        bag.info(
+            I_AREA_SKIPPED,
+            f"{stats.areas_skipped} of {len(ir.areas)} Area(s) were not converted"
+            + ("; object output is disabled" if not options.objects else ""),
+        )
+    if stats.polygons_skipped:
+        bag.info(
+            I_POLYGON_SKIPPED,
+            f"{stats.polygons_skipped} of {len(ir.polygons)} Polygon(s) were not converted"
+            + ("; object output is disabled" if not options.objects else ""),
+        )
+
+    signalled = {signal.lanelet2_id for road in model.roads for signal in road.signals}
+    unconverted = [r for r in ir.regelems if r.lanelet2_id not in signalled]
+    stats.regelems_skipped = len(unconverted)
+    if unconverted:
+        kinds = sorted({r.kind for r in unconverted})
+        reason = (
+            "; signal output is disabled"
+            if not options.signals
+            else "; these kinds have no <signal> equivalent (priority rules need "
+            "junction <priority>, which the backend does not model)"
+        )
+        bag.info(
+            I_REGELEM_SKIPPED,
+            f"{len(unconverted)} regulatory element(s) not converted ({', '.join(kinds)}){reason}",
+        )
+
+
+def _attach_furniture(builder, roads, ir: MapIR, options: TranspileOptions) -> None:
+    """Give every area and polygon to the road it lies nearest.
+
+    Map furniture belongs to no road in lanelet2, so one has to be chosen. The
+    nearest reference line is the only defensible answer, and attaching each to
+    exactly one road avoids the same parking bay appearing three times.
+    """
+    if not options.objects or not (ir.areas or ir.polygons):
+        return
+
+    live = [road for road in roads if road is not None and road.road_id in builder._references]
+    if not live:
+        return
+
+    def nearest(points) -> RoadSpec:
+        def distance(road: RoadSpec) -> float:
+            reference = builder._references[road.road_id]
+            anchor = points[0]
+            station = station_of_point(reference, (anchor[0], anchor[1]))
+            on_line, _heading = point_at_station(reference, station)
+            return (on_line[0] - anchor[0]) ** 2 + (on_line[1] - anchor[1]) ** 2
+
+        return min(live, key=distance)
+
+    for area in ir.areas:
+        points = [p for bound in area.outer for p in bound.coords]
+        if not points:
+            continue
+        road = nearest(points)
+        road.objects.extend(
+            furniture.objects_for(road, builder._references[road.road_id], [area], [], options)
+        )
+
+    for polygon in ir.polygons:
+        if polygon.bound is None or not polygon.bound.coords:
+            continue
+        road = nearest(polygon.bound.coords)
+        road.objects.extend(
+            furniture.objects_for(road, builder._references[road.road_id], [], [polygon], options)
+        )
 
 
 # --------------------------------------------------------------------------
@@ -181,6 +276,7 @@ class _RoadBuilder:
         self.bag = bag
         self.rels = rels
         self._swap_reported: set[int] = set()
+        self._references: dict[int, list[Vec3]] = {}
 
     # -- orientation -------------------------------------------------------
     def oriented_bounds(self, lanelet: LaneletIR) -> tuple[list[Vec3], list[Vec3], dict, dict]:
@@ -272,7 +368,11 @@ class _RoadBuilder:
                 self._build_section(group, group_refs[group_index], s, road_id)
             )
 
+        road.signals = furniture.signals_for(
+            road, reference, [lanelets[i] for i in chain.lanelet_indices], self.options
+        )
         road.lane_offsets = self._lane_offsets(chain.groups[0], reference)
+        self._references[road.road_id] = reference
         self._link_lane_sections(road, chain)
         return road
 

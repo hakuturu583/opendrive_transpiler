@@ -251,7 +251,52 @@ class ScenarioGenerationEmitter:
                 args.append(f"contact_point=xodr.ContactPoint.{link.contact_point}")
             writer.line(f"road_{rid}.{method}({', '.join(args)})")
 
+        for index, signal in enumerate(road.signals):
+            self._signal(writer, rid, index, signal)
+        for index, obj in enumerate(road.objects):
+            self._object(writer, rid, index, obj)
+
         writer.line(f"odr.add_road(road_{rid})")
+
+    def _signal(self, writer: SourceWriter, rid: int, index: int, signal) -> None:
+        name = f"sig_{rid}_{index}"
+        writer.comment(f"{signal.source} #{signal.lanelet2_id} at s = {signal.s:.6g} m")
+        args = [
+            literal(signal.s),
+            literal(signal.t),
+            literal(signal.country),
+            literal(signal.type),
+            f"subtype={literal(signal.subtype)}",
+            f"name={literal(signal.name)}",
+        ]
+        if signal.dynamic:
+            args.append("dynamic=xodr.Dynamic.yes")
+        if signal.value is not None:
+            args.append(f"value={literal(signal.value)}")
+            args.append(f"unit={literal(signal.unit)}")
+        args.append(f"zOffset={literal(signal.z_offset)}")
+        writer.line(f"{name} = xodr.Signal({', '.join(args)})")
+        if signal.validity is not None:
+            low, high = signal.validity
+            writer.line(f"{name}.add_validity({literal(low)}, {literal(high)})")
+        writer.line(f"road_{rid}.add_signal({name})")
+
+    def _object(self, writer: SourceWriter, rid: int, index: int, obj) -> None:
+        name = f"obj_{rid}_{index}"
+        writer.comment(f"{obj.source} #{obj.lanelet2_id}: {len(obj.corners)} outline corner(s)")
+        writer.line(
+            f"{name} = xodr.Object({literal(obj.s)}, {literal(obj.t)}, "
+            f"Type={literal(obj.type)}, name={literal(obj.name)})"
+        )
+        writer.line(f"{name}_outline = xodr.Outline(closed=True)")
+        for corner in obj.corners:
+            writer.line(
+                f"{name}_outline.add_corner(xodr.CornerRoad("
+                f"{literal(corner.s)}, {literal(corner.t)}, {literal(corner.dz)}, "
+                f"{literal(corner.height)}))"
+            )
+        writer.line(f"{name}.add_outline({name}_outline)")
+        writer.line(f"road_{rid}.add_object({name})")
 
     def _junction(self, writer: SourceWriter, junction) -> None:
         jid = junction.junction_id

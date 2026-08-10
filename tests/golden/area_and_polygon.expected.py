@@ -2,10 +2,8 @@
 
 source:  tests/fixtures/area_and_polygon.py
 sha256:  1bbddf82707c3425af2b47bc0365e5034470610933f1dbe1738f71d83af5741b
-summary: 1/1 lanelets converted, 1 roads, 1 lanes, 1 areas skipped, 1 polygons skipped
-notices: 2 info(s)
-    LL2ODR-I903: 1 Area(s) recognised (1 inner ring(s) also dropped); areas have no OpenDRIVE road equivalent and are not converted yet (planned as road <object> outlines)
-    LL2ODR-I904: 1 standalone Polygon(s) recognised; polygons are map furniture with no OpenDRIVE road equivalent and are not converted yet (planned as road <object> outlines)
+summary: 1/1 lanelets converted, 1 roads, 1 lanes, 2 objects
+notices: none
 
 Run this file to write area_and_polygon.xodr. Requires scenariogeneration:
     pip install "opendrive-transpiler[emit]"
@@ -38,6 +36,27 @@ def build() -> xodr.OpenDrive:
     road_1 = xodr.Road(1, pv_1, lanes_1, name='lanelet_7')
     road_1.add_type(xodr.RoadType.town, 0.0)
     road_1.add_elevation(0.0, 0.0, 0.0, 0.0, 0.0)
+    # Area #8: 8 outline corner(s)
+    obj_1_0 = xodr.Object(5.0, -12.0, Type='parkingSpace', name='area_8')
+    obj_1_0_outline = xodr.Outline(closed=True)
+    obj_1_0_outline.add_corner(xodr.CornerRoad(0.0, 4.0, 0.0, 0.0))
+    obj_1_0_outline.add_corner(xodr.CornerRoad(20.0, 4.0, 0.0, 0.0))
+    obj_1_0_outline.add_corner(xodr.CornerRoad(20.0, -4.0, 0.0, 0.0))
+    obj_1_0_outline.add_corner(xodr.CornerRoad(0.0, -4.0, 0.0, 0.0))
+    obj_1_0_outline.add_corner(xodr.CornerRoad(7.0, 1.0, 0.0, 0.0))
+    obj_1_0_outline.add_corner(xodr.CornerRoad(13.0, 1.0, 0.0, 0.0))
+    obj_1_0_outline.add_corner(xodr.CornerRoad(13.0, -1.0, 0.0, 0.0))
+    obj_1_0_outline.add_corner(xodr.CornerRoad(7.0, -1.0, 0.0, 0.0))
+    obj_1_0.add_outline(obj_1_0_outline)
+    road_1.add_object(obj_1_0)
+    # Polygon #25: 3 outline corner(s)
+    obj_1_1 = xodr.Object(30.0, 3.3333333333333335, Type='parkingSpace', name='polygon_25')
+    obj_1_1_outline = xodr.Outline(closed=True)
+    obj_1_1_outline.add_corner(xodr.CornerRoad(0.0, -1.3333333333333335, 0.0, 0.0))
+    obj_1_1_outline.add_corner(xodr.CornerRoad(6.0, -1.3333333333333335, 0.0, 0.0))
+    obj_1_1_outline.add_corner(xodr.CornerRoad(6.0, 2.6666666666666665, 0.0, 0.0))
+    obj_1_1.add_outline(obj_1_1_outline)
+    road_1.add_object(obj_1_1)
     odr.add_road(road_1)
 
     # Geometry is already fixed to the input coordinates, so this only derives lane links; it will not move anything.

@@ -17,9 +17,6 @@ from typing import Any
 
 from ..config import TranspileOptions
 from ..diagnostics import (
-    I_AREA_SKIPPED,
-    I_POLYGON_SKIPPED,
-    I_REGELEM_SKIPPED,
     W_DEGENERATE_LANELET,
     W_NO_LANELETS,
     DiagnosticBag,
@@ -75,6 +72,11 @@ class RegElemIR:
     attributes: dict[str, str] = field(default_factory=dict)
     roles: dict[str, tuple[int, ...]] = field(default_factory=dict)
     """Role name -> lanelet2 ids of the members, for reporting."""
+    geometry: dict[str, tuple[tuple[tuple[float, float, float], ...], ...]] = field(
+        default_factory=dict
+    )
+    """Role name -> the members' polylines. Needed to place a `<signal>`: a
+    traffic light is only locatable through the geometry it refers to."""
 
 
 @dataclass(frozen=True)
@@ -185,11 +187,22 @@ def _snapshot_regelem(regelem: Any) -> RegElemIR:
         role: tuple(int(getattr(m, "id", 0) or 0) for m in members)
         for role, members in getattr(regelem, "parameters", {}).items()
     }
+    geometry: dict[str, tuple[tuple[tuple[float, float, float], ...], ...]] = {}
+    for role, members in getattr(regelem, "parameters", {}).items():
+        lines: list[tuple[tuple[float, float, float], ...]] = []
+        for member in members:
+            points = getattr(member, "points", None)
+            if points:
+                lines.append(tuple(point.xyz for point in points))
+        if lines:
+            geometry[role] = tuple(lines)
+
     return RegElemIR(
         kind=getattr(regelem, "kind", "RegulatoryElement"),
         lanelet2_id=int(getattr(regelem, "id", 0) or 0),
         attributes=_snapshot_attributes(getattr(regelem, "attributes", {})),
         roles=roles,
+        geometry=geometry,
     )
 
 
@@ -310,30 +323,9 @@ def _report_deferred(ir: MapIR, bag: DiagnosticBag) -> None:
             "the script produced no convertible lanelets; nothing to emit",
         )
 
-    if ir.areas:
-        holes = sum(len(area.inners) for area in ir.areas)
-        detail = f" ({holes} inner ring(s) also dropped)" if holes else ""
-        bag.info(
-            I_AREA_SKIPPED,
-            f"{len(ir.areas)} Area(s) recognised{detail}; areas have no OpenDRIVE road "
-            "equivalent and are not converted yet (planned as road <object> outlines)",
-        )
-
-    if ir.polygons:
-        bag.info(
-            I_POLYGON_SKIPPED,
-            f"{len(ir.polygons)} standalone Polygon(s) recognised; polygons are map "
-            "furniture with no OpenDRIVE road equivalent and are not converted yet "
-            "(planned as road <object> outlines)",
-        )
-
-    if ir.regelems:
-        kinds = sorted({r.kind for r in ir.regelems})
-        bag.info(
-            I_REGELEM_SKIPPED,
-            f"{len(ir.regelems)} regulatory element(s) recognised "
-            f"({', '.join(kinds)}); signals and priorities are not converted yet",
-        )
+    # Areas, polygons and regulatory elements are reported by the mapping stage,
+    # which is the first place that knows whether each one actually reached the
+    # output. Claiming here that they were skipped would often be wrong.
 
 
 def iter_bounds(lanelets: Iterable[LaneletIR]) -> Iterable[BoundIR]:

@@ -411,8 +411,11 @@ def test_regulatory_element_is_recorded_and_reported():
         "[LineString3d(9, [Point3d(10, 0.0, 0.0, 0.0), Point3d(11, 1.0, 0.0, 0.0)])]))\n",
         strict=False,
     )
-    assert ir.lanelets[0].regelems[0].kind == "TrafficLight"
-    assert "LL2ODR-I902" in codes(bag)
+    regelem = ir.lanelets[0].regelems[0]
+    assert regelem.kind == "TrafficLight"
+    # The referred geometry comes through too: a signal cannot be placed without it.
+    assert regelem.geometry["refers"]
+    assert not bag.errors
 
 
 # --------------------------------------------------------------------------
@@ -421,7 +424,7 @@ def test_regulatory_element_is_recorded_and_reported():
 
 
 def test_areas_are_reported_with_their_holes():
-    """Silence here would be indistinguishable from "there was no area"."""
+    """The holes must survive the snapshot, or the outline loses them silently."""
     ir, bag = to_ir(
         "from lanelet2.core import Area, AttributeMap\n"
         "def ring(x0, y0, x1, y1):\n"
@@ -436,8 +439,7 @@ def test_areas_are_reported_with_their_holes():
     assert ir.areas[0].attributes["subtype"] == "parking"
     # The hole is carried through rather than dropped at the IR boundary.
     assert len(ir.areas[0].inners) == 1
-    assert "LL2ODR-I903" in codes(bag)
-    assert "inner ring" in next(d.message for d in bag if d.code == "LL2ODR-I903")
+    assert not bag.errors
 
 
 def test_standalone_polygons_are_reported():
@@ -449,7 +451,7 @@ def test_standalone_polygons_are_reported():
         strict=False,
     )
     assert len(ir.polygons) == 1
-    assert "LL2ODR-I904" in codes(bag)
+    assert not bag.errors
 
 
 def test_a_lanelet_bound_is_not_mistaken_for_a_polygon():

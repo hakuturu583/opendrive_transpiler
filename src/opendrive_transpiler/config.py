@@ -91,8 +91,11 @@ class TranspileOptions:
     """Emit `<junction>` elements at branch points, with the branch lanelets as
     connecting roads. Off means branches simply end their road, unconnected."""
 
-    signals: bool = False
-    """Phase 2. Off in this release; regulatory elements are reported and skipped."""
+    signals: bool = True
+    """Emit `<signal>` for traffic lights, signs and speed limits."""
+
+    objects: bool = True
+    """Emit `<object>` outlines for areas and standalone polygons."""
 
     # -- roadmark conventions (not carried by lanelet2 attributes) ---------
     thin_mark_width: float = 0.12

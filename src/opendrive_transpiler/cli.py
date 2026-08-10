@@ -114,6 +114,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not build <junction> elements; leave branching roads unconnected",
     )
 
+    topology.add_argument(
+        "--no-signals",
+        dest="signals",
+        action="store_false",
+        default=True,
+        help="do not emit <signal> for traffic lights, signs or speed limits",
+    )
+    topology.add_argument(
+        "--no-objects",
+        dest="objects",
+        action="store_false",
+        default=True,
+        help="do not emit <object> outlines for areas and polygons",
+    )
+
     header = parser.add_argument_group("header")
     header.add_argument("--geo-reference", default=None, help="override the PROJ string")
     header.add_argument(
@@ -145,6 +160,8 @@ def options_from(args: argparse.Namespace) -> TranspileOptions:
         width_sample_step=args.width_sample_step,
         cubic_profiles=args.cubic_profiles,
         junctions=args.junctions,
+        signals=args.signals,
+        objects=args.objects,
         name=args.name,
         geo_reference=args.geo_reference,
         emit_geo_reference=args.emit_geo_reference,

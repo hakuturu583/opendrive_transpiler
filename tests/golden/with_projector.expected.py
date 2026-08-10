@@ -2,9 +2,8 @@
 
 source:  tests/fixtures/with_projector.py
 sha256:  1f40d8c8db756d41e40719cc646ca5c42f8b0d542f6a7d1467b5dcf173c52ed8
-summary: 1/1 lanelets converted, 1 roads, 1 lanes, 1 regulatory elements skipped
-notices: 1 info(s)
-    LL2ODR-I902: 1 regulatory element(s) recognised (TrafficLight); signals and priorities are not converted yet
+summary: 1/1 lanelets converted, 1 roads, 1 lanes, 1 signals
+notices: none
 note:    geoReference derived from utm projector at lat=49.0, lon=8.4
 
 Run this file to write with_projector.xodr. Requires scenariogeneration:
@@ -38,6 +37,10 @@ def build() -> xodr.OpenDrive:
     road_1 = xodr.Road(1, pv_1, lanes_1, name='lanelet_30')
     road_1.add_type(xodr.RoadType.unknown, 0.0)
     road_1.add_elevation(0.0, 0.0, 0.0, 0.0, 0.0)
+    # TrafficLight #50 at s = 12.0416 m
+    sig_1_0 = xodr.Signal(12.041594578792296, -0.9965457582448797, 'OpenDRIVE', '1000001', subtype='-1', name='TrafficLight_50', dynamic=xodr.Dynamic.yes, zOffset=1.5)
+    sig_1_0.add_validity(-1, -1)
+    road_1.add_signal(sig_1_0)
     odr.add_road(road_1)
 
     # Geometry is already fixed to the input coordinates, so this only derives lane links; it will not move anything.

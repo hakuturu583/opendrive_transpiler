@@ -120,6 +120,8 @@ class RoadSpec:
     """Junction id, or -1 when the road is not part of one."""
     predecessor: LinkSpec | None = None
     successor: LinkSpec | None = None
+    signals: list[SignalSpec] = field(default_factory=list)
+    objects: list[ObjectSpec] = field(default_factory=list)
     lanelet2_ids: tuple[int, ...] = ()
     """Provenance: which lanelets this road was built from."""
     rule: str = "RHT"
@@ -130,6 +132,47 @@ class RoadSpec:
             return 0.0
         last = self.geometries[-1]
         return last.s + last.length
+
+
+@dataclass(frozen=True)
+class SignalSpec:
+    """A `<signal>`: a traffic light, sign or speed restriction on a road."""
+
+    s: float
+    t: float
+    country: str = "OpenDRIVE"
+    type: str = "1000001"
+    subtype: str = "-1"
+    name: str = ""
+    dynamic: bool = False
+    value: float | None = None
+    unit: str | None = None
+    z_offset: float = 1.5
+    validity: tuple[int, int] | None = None
+    """(fromLane, toLane) the signal applies to."""
+    lanelet2_id: int = 0
+    source: str = ""
+
+
+@dataclass(frozen=True)
+class OutlineCorner:
+    s: float
+    t: float
+    dz: float = 0.0
+    height: float = 0.0
+
+
+@dataclass(frozen=True)
+class ObjectSpec:
+    """An `<object>`: map furniture with an outline, such as an area or polygon."""
+
+    s: float
+    t: float
+    type: str = "none"
+    name: str = ""
+    corners: tuple[OutlineCorner, ...] = ()
+    lanelet2_id: int = 0
+    source: str = ""
 
 
 @dataclass
@@ -178,6 +221,8 @@ class TranspileStats:
     lane_sections: int = 0
     lanes: int = 0
     junctions: int = 0
+    signals: int = 0
+    objects: int = 0
     areas_skipped: int = 0
     polygons_skipped: int = 0
     regelems_skipped: int = 0
@@ -188,6 +233,10 @@ class TranspileStats:
             f"{self.roads} roads",
             f"{self.lanes} lanes",
         ]
+        if self.signals:
+            parts.append(f"{self.signals} signals")
+        if self.objects:
+            parts.append(f"{self.objects} objects")
         if self.lanelets_skipped:
             parts.append(f"{self.lanelets_skipped} lanelets skipped")
         if self.areas_skipped:
