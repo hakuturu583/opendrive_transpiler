@@ -166,6 +166,16 @@ opposite sides of it as `+1`/`-1` — which is exactly what an OpenDRIVE left la
 means. That overrides `--reference-line`, because no other choice puts traffic on
 the correct side.
 
+**Geocentric maps are the one case where the geometry is moved.** Every other
+projector hands over a planar metre frame, so coordinates pass through untouched
+and the projection only decides what the header says they mean.
+`GeocentricProjector` emits earth-centred XYZ instead, in which no two axes span a
+horizontal plane — near Tokyo a road sits at about (-3.96e6, 3.35e6, 3.70e6) m and
+"up" is a mixture of all three. Reading x and y as a plan view would foreshorten
+every road and tilt every flat one, so such a map is rotated into east/north/up
+about its own centroid first, and `<geoReference>` names that plane with
+`+proj=topocentric`. The rotation is rigid and is reported (`LL2ODR-I909`).
+
 **Nothing is dropped silently.** Every feature that is recognised but not
 converted emits a diagnostic naming it, and the same list is repeated in the
 generated file's header. A half-converted HD map that looks complete is worse
@@ -198,8 +208,6 @@ things and the difference matters when planning around it.
 
 | Feature | Code | Why it is still open |
 |---|---|---|
-| Junction `<priority>` from `RightOfWay` / `AllWayStop` | `LL2ODR-I905` | **Blocked by the backend.** `scenariogeneration` does not model `<priority>` at all, so it cannot be emitted without patching it or writing XML directly. |
-| Geocentric `<geoReference>` | `LL2ODR-I906` | **No equivalent exists.** Geocentric coordinates are earth-centred XYZ; there is no planar PROJ string that means the same thing. |
 | `<spiral>` fitting | — | Not done. Fitting a clothoid to a polyline is a genuinely harder problem than arcs or cubics; `--fit=arc` and `--fit=parampoly3` cover the continuity case. |
 | `load()` / `loadRobust()` from an `.osm` | `LL2ODR-E402` | Not done, and it would change what this tool is: it converts maps a script *builds*, so reading one would mean adding an OSM parser and full inverse projections. |
 | Third-party modules other than `math`, including `random` | — | **Out of scope by choice.** Evaluating them means running them, which the design forbids; their calls yield `Unknown` and any branch on one is reported (`LL2ODR-W601`). |
@@ -297,7 +305,8 @@ things and the difference matters when planning around it.
       `NoStoppingArea`, `RoadMarking`, `SpeedBump`, `AutowareTrafficLight`
 - [x] `RegulatoryElement` and `VirtualTrafficLight` refuse construction, as lanelet2 does
 - [x] `TrafficLight`, `SpeedLimit`, `TrafficSign`, `AutowareTrafficLight` → `<signal>`
-- [ ] `RightOfWay` / `AllWayStop` → junction `<priority>` (`LL2ODR-I905`, backend gap)
+- [x] `RightOfWay` → junction `<priority>`. `AllWayStop` deliberately does not:
+      every approach yields to every other, so there is no ranking to express
 
 **I/O and projection**
 
@@ -307,7 +316,11 @@ things and the difference matters when planning around it.
 - [x] `write()` / `writeRobust()` — accepted and ignored (we convert the map, not the file)
 - [ ] `load()` / `loadRobust()` — reported (`LL2ODR-E402`); the map exists only at runtime
 - [x] `MGRSProjector` — reproduced as UTM offset to the origin's 100 km square
-- [ ] `GeocentricProjector` — earth-centred XYZ has no planar equivalent (`LL2ODR-I906`)
+- [x] `GeocentricProjector` — the one projector whose coordinates are not a plan
+      view, so the geometry is rotated onto the tangent plane at the map's own
+      centroid and the header names that plane with `+proj=topocentric`
+      (`LL2ODR-I909`). A rigid transform: lengths, adjacency and node identity
+      all survive it
 - [x] UTM `useOffset=True` false easting, via a Krüger-series forward projection
       (agrees with pyproj to under 0.1 mm)
 
@@ -341,8 +354,11 @@ build a map and then run dozens of queries; we want the map.
 - [x] Lane-count changes as lane sections of differing width, linked lane by lane
 - [ ] `<spiral>` planView fitting
 - [x] Left lanes (`+1, +2, …`) for opposing traffic; `one_way=no` → `bidirectional`
-- [ ] Junction `<priority>` (`LL2ODR-I905`) — not modelled by the backend
-- [ ] Road `<shape>`; guard rails and crosswalk markings as objects
+- [x] Junction `<priority>` from `RightOfWay`. `scenariogeneration` does not model
+      the element, so the generated script carries an eight-line `Junction`
+      subclass that appends it
+- [ ] Road `<shape>`
+- [ ] Guard rails and crosswalk markings as objects
 
 ---
 

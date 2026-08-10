@@ -13,7 +13,13 @@ import pytest
 
 from opendrive_transpiler.config import TranspileOptions
 from opendrive_transpiler.ir.model import ProjectionIR
-from opendrive_transpiler.mapping.proj import utm_forward
+from opendrive_transpiler.mapping.proj import (
+    ecef_to_enu,
+    ecef_to_geodetic,
+    enu_basis,
+    geodetic_to_ecef,
+    utm_forward,
+)
 from opendrive_transpiler.mapping.tables import (
     geo_reference_for,
     lane_type_for,
@@ -274,12 +280,22 @@ def test_mgrs_is_reproduced_as_an_offset_utm_zone():
     assert caveat is not None  # the grid letters are not carried
 
 
-def test_geocentric_has_no_planar_equivalent():
+def test_geocentric_names_the_tangent_plane_it_was_rotated_onto():
+    """By this stage the map is in east/north/up, so that is what the header says.
+
+    PROJ's topocentric takes its origin in earth-centred metres, which describes
+    the tangent plane exactly rather than standing in for it with a conformal
+    projection.
+    """
     proj, caveat = geo_reference_for(
-        ProjectionIR("geocentric", lat=0.0, lon=0.0, alt=0.0, use_offset=False)
+        ProjectionIR("geocentric", lat=35.68, lon=139.7, alt=40.0, use_offset=False)
     )
-    assert proj is None
-    assert "earth-centred" in caveat
+    assert caveat is None
+    assert "+proj=topocentric" in proj
+    x0 = float(proj.split("+X_0=")[1].split()[0])
+    y0 = float(proj.split("+Y_0=")[1].split()[0])
+    z0 = float(proj.split("+Z_0=")[1].split()[0])
+    assert (x0, y0, z0) == geodetic_to_ecef(35.68, 139.7, 40.0)
 
 
 def test_southern_hemisphere_utm():
@@ -291,3 +307,86 @@ def test_southern_hemisphere_utm():
 
 def test_no_projector_means_no_geo_reference():
     assert geo_reference_for(None) == (None, None)
+
+
+# --------------------------------------------------------------------------
+# Earth-centred coordinates
+# --------------------------------------------------------------------------
+# Reference values cross-checked against pyproj (+proj=geocent +datum=WGS84),
+# embedded rather than imported so the suite stays dependency-free -- the same
+# arrangement the UTM cases above use.
+
+ECEF_CASES = [
+    ((35.68, 139.7, 40.0), (-3955823.9633827023, 3354782.6878813645, 3699431.973876118)),
+    ((0.0, 0.0, 0.0), (6378137.0, 0.0, 0.0)),
+    ((-33.87, 151.2, 5.0), (-4645575.419946929, 2553926.6992282085, -3534485.692082713)),
+    ((90.0, 0.0, 0.0), (0.0, 0.0, 6356752.314245179)),
+]
+
+
+@pytest.mark.parametrize("geodetic,ecef", ECEF_CASES)
+def test_geodetic_to_ecef_matches_proj(geodetic, ecef):
+    ours = geodetic_to_ecef(*geodetic)
+    for got, want in zip(ours, ecef, strict=True):
+        assert math.isclose(got, want, abs_tol=1e-6)
+
+
+@pytest.mark.parametrize("geodetic,ecef", ECEF_CASES)
+def test_ecef_to_geodetic_inverts_it(geodetic, ecef):
+    latitude, longitude, altitude = ecef_to_geodetic(*ecef)
+    want_lat, want_lon, want_alt = geodetic
+    assert math.isclose(latitude, want_lat, abs_tol=1e-9)
+    assert math.isclose(altitude, want_alt, abs_tol=1e-6)
+    if abs(want_lat) != 90.0:  # longitude is undefined at a pole
+        assert math.isclose(longitude, want_lon, abs_tol=1e-9)
+
+
+def test_the_enu_basis_is_orthonormal_and_right_handed():
+    east, north, up = enu_basis(35.68, 139.7)
+    for vector in (east, north, up):
+        assert math.isclose(math.sqrt(sum(c * c for c in vector)), 1.0, abs_tol=1e-12)
+    for a, b in ((east, north), (north, up), (up, east)):
+        assert math.isclose(sum(x * y for x, y in zip(a, b, strict=True)), 0.0, abs_tol=1e-12)
+    # east x north == up, which is what makes the frame right-handed.
+    cross = (
+        east[1] * north[2] - east[2] * north[1],
+        east[2] * north[0] - east[0] * north[2],
+        east[0] * north[1] - east[1] * north[0],
+    )
+    for got, want in zip(cross, up, strict=True):
+        assert math.isclose(got, want, abs_tol=1e-12)
+
+
+def test_east_and_north_point_the_way_their_names_say():
+    """A step of known bearing must land on the expected axis."""
+    latitude, longitude, altitude = 35.68, 139.7, 40.0
+    anchor = geodetic_to_ecef(latitude, longitude, altitude)
+    basis = enu_basis(latitude, longitude)
+
+    # 0.001 degrees of longitude is eastward; of latitude, northward.
+    east_step = ecef_to_enu(geodetic_to_ecef(latitude, longitude + 0.001, altitude), anchor, basis)
+    north_step = ecef_to_enu(geodetic_to_ecef(latitude + 0.001, longitude, altitude), anchor, basis)
+
+    assert east_step[0] > 80.0 and abs(east_step[1]) < 1e-3
+    assert north_step[1] > 100.0 and abs(north_step[0]) < 1e-3
+    # Both stay on the tangent plane's surface, bar the curvature drop.
+    assert abs(east_step[2]) < 0.01 and abs(north_step[2]) < 0.01
+
+
+def test_the_anchor_is_its_own_origin():
+    latitude, longitude, altitude = -33.87, 151.2, 5.0
+    anchor = geodetic_to_ecef(latitude, longitude, altitude)
+    at_origin = ecef_to_enu(anchor, anchor, enu_basis(latitude, longitude))
+    assert at_origin == (0.0, 0.0, 0.0)
+
+
+def test_the_tangent_transform_preserves_distance():
+    """It is a rotation and a translation, so lengths must survive exactly."""
+    anchor = geodetic_to_ecef(35.68, 139.7, 40.0)
+    basis = enu_basis(35.68, 139.7)
+    a = geodetic_to_ecef(35.681, 139.701, 45.0)
+    b = geodetic_to_ecef(35.682, 139.703, 60.0)
+
+    before = math.dist(a, b)
+    after = math.dist(ecef_to_enu(a, anchor, basis), ecef_to_enu(b, anchor, basis))
+    assert math.isclose(before, after, rel_tol=1e-12)

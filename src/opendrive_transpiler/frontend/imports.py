@@ -21,7 +21,6 @@ from typing import Any
 from ..diagnostics import (
     E_LOAD_FROM_FILE,
     E_NOT_INSTANTIABLE,
-    I_PROJECTION_SKIPPED,
     I_QUERY_IGNORED,
     DiagnosticBag,
     SourceSpan,
@@ -519,12 +518,10 @@ class Registry:
             # Last projector wins: scripts that build several are choosing the
             # one they pass to write(), and we cannot tell which from here.
             self.projection = info
-            if kind in {"mgrs", "geocentric"}:
-                self.bag.info(
-                    I_PROJECTION_SKIPPED,
-                    f"{kind} projection has no PROJ equivalent; <geoReference> omitted",
-                    span,
-                )
+            # Whether a projection reaches <geoReference>, and with what caveat,
+            # is decided in the mapping stage -- reporting it here would be
+            # guessing at an outcome this stage cannot see, and for mgrs and
+            # geocentric the guess was wrong: both do produce a PROJ string.
             return info
 
         return ctor

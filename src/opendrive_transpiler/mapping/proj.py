@@ -1,22 +1,31 @@
-"""A pure-Python UTM forward projection, for georeferencing metadata only.
+"""Pure-Python projections, in `math` only, so the zero-dependency core survives.
 
-`UtmProjector(origin, useOffset=True)` -- lanelet2's default -- subtracts the
-origin's easting and northing, so map coordinates are metres relative to the
-origin rather than absolute UTM. A `<geoReference>` that named only the zone
-would therefore be wrong by a few hundred kilometres.
+Two jobs live here, and they are not the same job.
 
-Getting it right needs the origin's actual easting and northing, which needs a
-real projection. This is the Krüger series that PROJ and GeographicLib use,
-truncated at the fourth order -- sub-millimetre within a UTM zone, and about
-forty lines of `math`, so the zero-dependency core survives.
+**UTM forward, for georeferencing metadata.** `UtmProjector(origin,
+useOffset=True)` -- lanelet2's default -- subtracts the origin's easting and
+northing, so map coordinates are metres relative to the origin rather than
+absolute UTM. A `<geoReference>` that named only the zone would be wrong by a few
+hundred kilometres. Getting it right needs the origin's actual easting and
+northing, which needs a real projection: this is the Krüger series that PROJ and
+GeographicLib use, truncated at the fourth order -- sub-millimetre within a zone.
+Nothing in that path touches the geometry; the map is already in metres, and the
+projection only decides what the header says those metres mean.
 
-Nothing here touches the geometry: the map is already in metres. This only
-decides what the header says the coordinates mean.
+**ECEF and the local tangent plane, which genuinely move points.**
+`GeocentricProjector` is the one projector whose output is *not* a planar metre
+frame: it emits earth-centred XYZ, where a road near Tokyo sits at around
+(-3.96e6, 3.35e6, 3.70e6) and "up" is a mixture of all three axes. Feeding those
+x and y straight into a plan view would foreshorten every road and tilt every
+flat one, so such a map is rotated onto a tangent plane first. That is what
+`ecef_to_geodetic` and `enu_basis` are for.
 """
 
 from __future__ import annotations
 
 import math
+
+from ..geometry.vec import Vec3
 
 # WGS84.
 _A = 6378137.0
@@ -24,6 +33,10 @@ _F = 1.0 / 298.257223563
 _K0 = 0.9996
 _FALSE_EASTING = 500000.0
 _FALSE_NORTHING_SOUTH = 10000000.0
+
+_B = _A * (1.0 - _F)
+_E2 = _F * (2.0 - _F)
+_EP2 = _E2 / (1.0 - _E2)
 
 _N = _F / (2.0 - _F)
 _RADIUS = (_A / (1.0 + _N)) * (1.0 + _N**2 / 4.0 + _N**4 / 64.0)
@@ -98,3 +111,75 @@ def mgrs_square_offsets(latitude: float, longitude: float) -> tuple[float, float
     square_north = math.floor(northing / 100000.0) * 100000.0
     base_northing = _FALSE_NORTHING_SOUTH if latitude < 0.0 else 0.0
     return _FALSE_EASTING - square_east, base_northing - square_north
+
+
+# --------------------------------------------------------------------------
+# Earth-centred coordinates and the local tangent plane
+# --------------------------------------------------------------------------
+
+
+def geodetic_to_ecef(latitude: float, longitude: float, altitude: float = 0.0) -> Vec3:
+    """WGS84 degrees and metres to earth-centred, earth-fixed XYZ."""
+    phi = math.radians(latitude)
+    lam = math.radians(longitude)
+    sin_phi = math.sin(phi)
+    # Radius of curvature in the prime vertical.
+    nu = _A / math.sqrt(1.0 - _E2 * sin_phi * sin_phi)
+    return (
+        (nu + altitude) * math.cos(phi) * math.cos(lam),
+        (nu + altitude) * math.cos(phi) * math.sin(lam),
+        (nu * (1.0 - _E2) + altitude) * sin_phi,
+    )
+
+
+def ecef_to_geodetic(x: float, y: float, z: float) -> Vec3:
+    """Earth-centred XYZ back to WGS84 `(latitude, longitude, altitude)`.
+
+    Bowring's closed form. Iterating instead would converge too, but a closed
+    form has no tolerance to tune and no way to stop short of the answer; the
+    residual here is well under a micrometre for anything on or near the surface.
+    """
+    longitude = math.atan2(y, x)
+    p = math.hypot(x, y)
+    if p == 0.0:
+        # On the axis: latitude is +-90 and longitude is arbitrary, so say 0.
+        pole = math.copysign(90.0, z or 1.0)
+        return pole, 0.0, abs(z) - _B
+
+    theta = math.atan2(z * _A, p * _B)
+    latitude = math.atan2(
+        z + _EP2 * _B * math.sin(theta) ** 3,
+        p - _E2 * _A * math.cos(theta) ** 3,
+    )
+    sin_lat = math.sin(latitude)
+    nu = _A / math.sqrt(1.0 - _E2 * sin_lat * sin_lat)
+    altitude = p / math.cos(latitude) - nu
+    return math.degrees(latitude), math.degrees(longitude), altitude
+
+
+def enu_basis(latitude: float, longitude: float) -> tuple[Vec3, Vec3, Vec3]:
+    """The east, north and up unit vectors at a point, in ECEF axes.
+
+    Returned as rows, so `east . d` is the eastward component of an ECEF offset.
+    """
+    phi = math.radians(latitude)
+    lam = math.radians(longitude)
+    sin_phi, cos_phi = math.sin(phi), math.cos(phi)
+    sin_lam, cos_lam = math.sin(lam), math.cos(lam)
+    return (
+        (-sin_lam, cos_lam, 0.0),
+        (-sin_phi * cos_lam, -sin_phi * sin_lam, cos_phi),
+        (cos_phi * cos_lam, cos_phi * sin_lam, sin_phi),
+    )
+
+
+def ecef_to_enu(point: Vec3, anchor: Vec3, basis: tuple[Vec3, Vec3, Vec3]) -> Vec3:
+    """One ECEF point as east/north/up metres about `anchor`.
+
+    The basis is passed in rather than recomputed because a map rotates tens of
+    thousands of points through the same one.
+    """
+    dx = point[0] - anchor[0]
+    dy = point[1] - anchor[1]
+    dz = point[2] - anchor[2]
+    return tuple(row[0] * dx + row[1] * dy + row[2] * dz for row in basis)  # type: ignore[return-value]

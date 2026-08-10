@@ -16,7 +16,7 @@ import re
 from ..config import TranspileOptions
 from ..ir.model import ProjectionIR
 from ..odr.model import RoadMarkSpec
-from .proj import mgrs_square_offsets, utm_offsets, utm_zone
+from .proj import geodetic_to_ecef, mgrs_square_offsets, utm_offsets, utm_zone
 
 # --------------------------------------------------------------------------
 # Lanelet subtype -> OpenDRIVE lane type
@@ -270,11 +270,15 @@ def geo_reference_for(projection: ProjectionIR | None) -> tuple[str | None, str 
         )
 
     if kind == "geocentric":
-        # Geocentric is a 3D earth-centred frame, not a map projection: there is
-        # no 2D PROJ string that means the same thing.
-        return None, (
-            "geocentric coordinates are earth-centred XYZ, which has no planar PROJ "
-            "equivalent; <geoReference> omitted"
+        # By the time this runs the map has been rotated onto the tangent plane
+        # at (lat, lon, alt), so what the header must describe is that plane --
+        # not the earth-centred frame the script wrote. PROJ calls it topocentric
+        # and wants the origin in earth-centred metres, which is exact: no
+        # conformal projection stands in for the tangent plane here.
+        x0, y0, z0 = geodetic_to_ecef(lat, lon, projection.alt)
+        return (
+            f"+proj=topocentric +ellps=WGS84 +X_0={x0!r} +Y_0={y0!r} +Z_0={z0!r} +units=m +no_defs",
+            None,
         )
 
     return None, f"{kind} projection has no PROJ equivalent"

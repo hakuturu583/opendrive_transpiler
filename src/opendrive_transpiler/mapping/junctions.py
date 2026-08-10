@@ -21,15 +21,23 @@ Two shapes are recognised, and they are mirror images:
 Anything more tangled (a branch that is itself a merge, overlapping lanelets in
 an intersection interior) is left alone and reported, because guessing at it
 would produce a junction that looks authoritative and is wrong.
+
+**Priority.** A lanelet2 `RightOfWay` says which lanelets go first and which must
+yield. OpenDRIVE says the same thing with `<priority high low>` inside the
+junction -- naming *connecting* roads, so a priority only exists once a junction
+has more than one of them. That makes divergences expressible and convergences
+not: a converging junction has a single connecting road, and there is nothing to
+rank it against. An `AllWayStop` has no ranking at all by definition -- every
+approach yields to every other -- so it is not a `<priority>` either.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..diagnostics import I_JUNCTION_SKIPPED, DiagnosticBag
+from ..diagnostics import I_JUNCTION_SKIPPED, I_PRIORITY_SKIPPED, DiagnosticBag
 from ..ir.model import MapIR
-from ..odr.model import ConnectionSpec, JunctionSpec, LinkSpec, RoadSpec
+from ..odr.model import ConnectionSpec, JunctionSpec, LinkSpec, PrioritySpec, RoadSpec
 from ..topology import grouping, relations
 
 
@@ -142,9 +150,61 @@ def build(
         else:
             _wire_converge(junction, stem, branches, network, rels, owner, site, ir)
 
+        _wire_priorities(junction, [stem, *(road for _index, road in branches)], ir)
         junctions.append(junction)
 
+    _report_priorities(junctions, ir, bag)
     return junctions
+
+
+def _wire_priorities(junction: JunctionSpec, involved: list[RoadSpec], ir: MapIR) -> None:
+    """Rank the junction's connecting roads from any `RightOfWay` over them."""
+    connecting = {connection.connecting_road for connection in junction.connections}
+    if len(connecting) < 2:
+        # One connecting road has nothing to be ranked against.
+        return
+
+    road_of_lanelet = {
+        lanelet_id: road.road_id for road in involved for lanelet_id in road.lanelet2_ids
+    }
+
+    def roads_for(regelem, role: str) -> list[int]:
+        return _unique(
+            [
+                road_of_lanelet[lanelet_id]
+                for lanelet_id in regelem.roles.get(role, ())
+                if road_of_lanelet.get(lanelet_id) in connecting
+            ]
+        )
+
+    for regelem in ir.regelems:
+        if regelem.kind != "RightOfWay":
+            continue
+        for high in roads_for(regelem, "right_of_way"):
+            for low in roads_for(regelem, "yield"):
+                if high != low:
+                    junction.priorities.append(
+                        PrioritySpec(high=high, low=low, regelem2_id=regelem.lanelet2_id)
+                    )
+
+
+def _report_priorities(junctions: list[JunctionSpec], ir: MapIR, bag: DiagnosticBag) -> None:
+    """Say which right-of-way rules did not become a `<priority>`, and why."""
+    right_of_way = [r for r in ir.regelems if r.kind == "RightOfWay"]
+    if not right_of_way:
+        return
+
+    expressed = {p.regelem2_id for junction in junctions for p in junction.priorities}
+    unexpressed = [r for r in right_of_way if r.lanelet2_id not in expressed]
+    if unexpressed:
+        names = ", ".join(f"#{r.lanelet2_id}" for r in unexpressed)
+        bag.info(
+            I_PRIORITY_SKIPPED,
+            f"{len(unexpressed)} RightOfWay ({names}) did not become a <priority>: "
+            "OpenDRIVE ranks a junction's connecting roads, so both a right-of-way "
+            "and a yielding lanelet have to land on different connecting roads of "
+            "the same junction",
+        )
 
 
 def _wire_diverge(

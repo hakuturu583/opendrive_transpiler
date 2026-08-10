@@ -18,6 +18,7 @@ OpenDRIVE permits an off-centre reference line, and consumers handle it.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from itertools import pairwise
 
 from ..config import TranspileOptions
@@ -26,6 +27,7 @@ from ..diagnostics import (
     I_GEO_REFERENCE,
     I_JUNCTION_SKIPPED,
     I_POLYGON_SKIPPED,
+    I_PROJECTION_LOCALISED,
     I_REGELEM_SKIPPED,
     I_TWO_WAY,
     W_BAD_SPEED_LIMIT,
@@ -66,7 +68,7 @@ from ..odr.model import (
 )
 from ..topology import grouping, relations
 from ..topology.index import NodeIndex
-from . import furniture, junctions, tables
+from . import furniture, junctions, localise, tables
 
 
 def build_model(
@@ -81,6 +83,10 @@ def build_model(
 
     if not ir.lanelets:
         return model, stats
+
+    # Earth-centred coordinates are not a plan view, so they are rotated onto a
+    # tangent plane before anything below measures a length or fits an arc.
+    ir = _localise(ir, bag)
 
     _apply_geo_reference(ir, model, bag, options)
 
@@ -151,16 +157,19 @@ def _report_furniture(
             + ("; object output is disabled" if not options.objects else ""),
         )
 
-    signalled = {signal.lanelet2_id for road in model.roads for signal in road.signals}
-    unconverted = [r for r in ir.regelems if r.lanelet2_id not in signalled]
+    # A regulatory element reaches the output as a <signal> or, for right-of-way
+    # rules, as a junction <priority>. Counting only signals would report a rule
+    # that did convert as dropped.
+    converted = {signal.lanelet2_id for road in model.roads for signal in road.signals}
+    converted |= {p.regelem2_id for junction in model.junctions for p in junction.priorities}
+    unconverted = [r for r in ir.regelems if r.lanelet2_id not in converted]
     stats.regelems_skipped = len(unconverted)
     if unconverted:
         kinds = sorted({r.kind for r in unconverted})
         reason = (
             "; signal output is disabled"
             if not options.signals
-            else "; these kinds have no <signal> equivalent (priority rules need "
-            "junction <priority>, which the backend does not model)"
+            else "; these kinds have no <signal> equivalent"
         )
         bag.info(
             I_REGELEM_SKIPPED,
@@ -213,6 +222,35 @@ def _attach_furniture(builder, roads, ir: MapIR, options: TranspileOptions) -> N
 # --------------------------------------------------------------------------
 # Header
 # --------------------------------------------------------------------------
+
+
+def _localise(ir: MapIR, bag: DiagnosticBag) -> MapIR:
+    """Move an earth-centred map into east/north/up about its own centroid.
+
+    Any other projection is already a planar metre frame and is left alone.
+    The projector carries no origin -- geocentric coordinates are absolute -- so
+    the anchor is recovered from the data and written back onto the projection,
+    which is what lets `<geoReference>` name the frame the geometry now lives in.
+    """
+    if ir.projection is None or ir.projection.kind != "geocentric":
+        return ir
+
+    rebased = localise.rebase(ir)
+    if rebased is None:  # pragma: no cover - guarded by the caller's emptiness check
+        return ir
+
+    moved, _anchor, (latitude, longitude, altitude) = rebased
+    moved.projection = replace(
+        ir.projection, lat=latitude, lon=longitude, alt=altitude, use_offset=False
+    )
+    bag.info(
+        I_PROJECTION_LOCALISED,
+        "geocentric coordinates are earth-centred XYZ, which is not a plan view; "
+        f"the map was rotated onto the tangent plane at lat={latitude:.9f}, "
+        f"lon={longitude:.9f}, h={altitude:.3f} m -- a rigid transform, so lengths "
+        "and adjacency are unchanged",
+    )
+    return moved
 
 
 def _apply_geo_reference(

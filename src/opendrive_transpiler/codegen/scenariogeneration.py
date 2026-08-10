@@ -95,7 +95,14 @@ class ScenarioGenerationEmitter:
         writer = SourceWriter()
         self._header(writer, model, stats, bag, source_name, source_text)
         writer.blank()
+        needs_priority = any(junction.priorities for junction in model.junctions)
+        if needs_priority:
+            writer.line("import xml.etree.ElementTree as ET")
+            writer.blank()
         writer.line("from scenariogeneration import xodr")
+        if needs_priority:
+            writer.blank(2)
+            self._priority_shim(writer)
         writer.blank(2)
         writer.line("def build() -> xodr.OpenDrive:")
         with writer.block():
@@ -125,6 +132,34 @@ class ScenarioGenerationEmitter:
         # rather than letting it reach the user as a confusing ImportError later.
         ast.parse(source, filename="<generated>")
         return source
+
+    def _priority_shim(self, writer: SourceWriter) -> None:
+        """Emit a Junction that can carry `<priority>`.
+
+        `scenariogeneration` does not model the element -- its `Junction` writes
+        only attributes and connections -- so the alternative to these eight lines
+        would be dropping right-of-way rules the input map states outright.
+        Subclassing keeps everything else about the junction the library's job.
+        """
+        writer.line("class _JunctionWithPriority(xodr.Junction):")
+        with writer.block():
+            writer.line('"""xodr.Junction plus <priority>, which the library omits."""')
+            writer.blank()
+            writer.line("def __init__(self, *args, **kwargs):")
+            with writer.block():
+                writer.line("super().__init__(*args, **kwargs)")
+                writer.line("self.priorities = []")
+            writer.blank()
+            writer.line("def get_element(self):")
+            with writer.block():
+                writer.line("element = super().get_element()")
+                writer.comment("OpenDRIVE orders <junction> as connection*, priority*.")
+                writer.line("for high, low in self.priorities:")
+                with writer.block():
+                    writer.line(
+                        'ET.SubElement(element, "priority", {"high": str(high), "low": str(low)})'
+                    )
+                writer.line("return element")
 
     # ------------------------------------------------------------------
     def _header(
@@ -300,8 +335,18 @@ class ScenarioGenerationEmitter:
 
     def _junction(self, writer: SourceWriter, junction) -> None:
         jid = junction.junction_id
-        writer.rule(f"junction {jid}  ({len(junction.connections)} connection(s))")
-        writer.line(f"junction_{jid} = xodr.Junction({literal(junction.name)}, {literal(jid)})")
+        counts = f"{len(junction.connections)} connection(s)"
+        if junction.priorities:
+            counts += f", {len(junction.priorities)} priority record(s)"
+        writer.rule(f"junction {jid}  ({counts})")
+        constructor = "_JunctionWithPriority" if junction.priorities else "xodr.Junction"
+        writer.line(f"junction_{jid} = {constructor}({literal(junction.name)}, {literal(jid)})")
+        for priority in junction.priorities:
+            writer.comment(f"RightOfWay #{priority.regelem2_id}")
+            writer.line(
+                f"junction_{jid}.priorities.append("
+                f"({literal(priority.high)}, {literal(priority.low)}))"
+            )
         for index, connection in enumerate(junction.connections):
             name = f"conn_{jid}_{index}"
             writer.line(

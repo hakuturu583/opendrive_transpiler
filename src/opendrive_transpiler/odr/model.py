@@ -184,10 +184,25 @@ class ConnectionSpec:
 
 
 @dataclass
+class PrioritySpec:
+    """One `<priority>` record: which connecting road yields to which.
+
+    OpenDRIVE names both by *connecting* road id, not by incoming road, so a
+    priority only exists where a junction has more than one connecting road.
+    """
+
+    high: int
+    low: int
+    regelem2_id: int = 0
+    """The lanelet2 RightOfWay this came from, for traceability."""
+
+
+@dataclass
 class JunctionSpec:
     junction_id: int
     name: str = ""
     connections: list[ConnectionSpec] = field(default_factory=list)
+    priorities: list[PrioritySpec] = field(default_factory=list)
 
 
 @dataclass

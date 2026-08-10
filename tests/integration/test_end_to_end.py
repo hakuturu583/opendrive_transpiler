@@ -218,3 +218,60 @@ def test_a_script_that_loads_from_disk_is_refused(tmp_path: Path):
     result = transpile(fixtures / "loads_from_file.py", options=TranspileOptions(strict=False))
     assert not result.ok
     assert any(d.code == "LL2ODR-E402" for d in result.errors)
+
+
+def test_a_right_of_way_becomes_a_junction_priority(tmp_path: Path):
+    """`<priority>` names connecting roads, and follows the connections in order."""
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    root = convert(fixtures / "right_of_way.py", tmp_path)
+
+    junction = root.find("junction")
+    assert junction is not None
+
+    priorities = junction.findall("priority")
+    assert len(priorities) == 1
+    high = priorities[0].get("high")
+    low = priorities[0].get("low")
+
+    connecting = {c.get("connectingRoad") for c in junction.findall("connection")}
+    assert {high, low} <= connecting, "priority must name connecting roads"
+    assert high != low
+
+    # The schema orders <junction> as connection*, then priority*.
+    tags = [child.tag for child in junction]
+    assert tags == sorted(tags, key=["connection", "priority"].index)
+
+
+def test_a_geocentric_map_is_georeferenced_to_its_tangent_plane(tmp_path: Path):
+    """Earth-centred input still produces a usable, correctly labelled plan view."""
+    from opendrive_transpiler.mapping.proj import geodetic_to_ecef
+
+    left = [geodetic_to_ecef(35.68 + i * 1e-4, 139.7, 40.0) for i in range(3)]
+    right = [geodetic_to_ecef(35.68 + i * 1e-4, 139.70004, 40.0) for i in range(3)]
+
+    def points(name, coords):
+        body = ", ".join(f"Point3d(getId(), {x!r}, {y!r}, {z!r})" for x, y, z in coords)
+        return f"{name} = LineString3d(getId(), [{body}])\n"
+
+    source = (
+        "from lanelet2.core import Lanelet, LineString3d, Point3d, getId\n"
+        "from lanelet2.projection import GeocentricProjector\n"
+        "proj = GeocentricProjector()\n"
+        + points("a", left)
+        + points("b", right)
+        + "ll = Lanelet(getId(), a, b)\n"
+        "ll.attributes['subtype'] = 'road'\n"
+    )
+
+    script = tmp_path / "geocentric.py"
+    script.write_text(source)
+    root = convert(script, tmp_path)
+
+    geo = root.find("header/geoReference")
+    assert geo is not None
+    assert "+proj=topocentric" in geo.text
+
+    # The plan view is local metres, not the millions the script wrote.
+    geometry = root.find("road/planView/geometry")
+    assert abs(float(geometry.get("x"))) < 1000.0
+    assert abs(float(geometry.get("y"))) < 1000.0
