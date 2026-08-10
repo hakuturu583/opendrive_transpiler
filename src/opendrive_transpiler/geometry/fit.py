@@ -15,7 +15,9 @@ the lanelet2 centerline algorithm advances one bound at a time and so returns
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
+from itertools import pairwise
 
 from ..odr.model import GeometryRecord
 from .polyline import dedupe, headings, segment_lengths
@@ -24,10 +26,12 @@ from .vec import (
     Vec3,
     angle_difference,
     cross2,
+    distance2,
     dot2,
     heading,
     left_normal,
     normalize2,
+    normalize_angle,
     point_segment_distance,
     sub2,
 )
@@ -111,9 +115,271 @@ def line_geometries(points: Sequence[Vec3]) -> list[GeometryRecord]:
     return records
 
 
+# --------------------------------------------------------------------------
+# Arc fitting
+# --------------------------------------------------------------------------
+
+
+def _circumcircle(a: Vec2, b: Vec2, c: Vec2) -> tuple[float, float, float] | None:
+    """Centre and radius of the circle through three points, or None if collinear."""
+    ax, ay = a
+    bx, by = b
+    cx, cy = c
+    d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-15:
+        return None
+    a2 = ax * ax + ay * ay
+    b2 = bx * bx + by * by
+    c2 = cx * cx + cy * cy
+    ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d
+    uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d
+    return ux, uy, math.hypot(ax - ux, ay - uy)
+
+
+def _fit_arc(
+    pts: Sequence[Vec3], start: int, stop: int, chord_tolerance: float
+) -> tuple[float, float, float] | None:
+    """Fit a circular arc through `pts[start..stop]`.
+
+    Returns `(curvature, length, start_heading)`, or None when the run is not
+    arc-like. Curvature is signed: positive turns left, matching OpenDRIVE.
+    """
+    a: Vec2 = (pts[start][0], pts[start][1])
+    b: Vec2 = (pts[stop][0], pts[stop][1])
+    middle = pts[(start + stop) // 2]
+    circle = _circumcircle(a, (middle[0], middle[1]), b)
+    if circle is None:
+        return None
+    cx, cy, radius = circle
+    if radius <= 0.0 or not math.isfinite(radius):
+        return None
+
+    # Direction of travel around the centre.
+    turn = cross2(sub2((middle[0], middle[1]), a), sub2(b, (middle[0], middle[1])))
+    if turn == 0.0:
+        return None
+    sign = 1.0 if turn > 0.0 else -1.0
+
+    def angle_at(point: Vec3 | Vec2) -> float:
+        return math.atan2(point[1] - cy, point[0] - cx)
+
+    theta_a = angle_at(a)
+
+    def swept(point: Vec3 | Vec2) -> float:
+        """How far round the circle `point` is from the start, in travel order."""
+        delta = (angle_at(point) - theta_a) * sign
+        return delta % (2.0 * math.pi)
+
+    # Every vertex must lie on the circle and progress monotonically along it,
+    # or this run is not a single arc.
+    previous = 0.0
+    for index in range(start + 1, stop + 1):
+        point = pts[index]
+        if abs(math.hypot(point[0] - cx, point[1] - cy) - radius) > chord_tolerance:
+            return None
+        advance = swept(point)
+        if advance <= previous:
+            return None
+        previous = advance
+
+    total = previous
+    if total <= 0.0 or total >= 2.0 * math.pi:
+        return None
+
+    curvature = sign / radius
+    length = radius * total
+    start_heading = normalize_angle(theta_a + sign * math.pi / 2.0)
+    return curvature, length, start_heading
+
+
+def arc_geometries(
+    points: Sequence[Vec3],
+    *,
+    chord_tolerance: float = 1e-4,
+    min_curvature: float = 1e-8,
+) -> list[GeometryRecord]:
+    """Greedy arc fitting: longest arc-or-line run at each step.
+
+    Unlike `line_geometries`, this trades exactness for curvature continuity
+    within each run -- vertices may sit up to `chord_tolerance` off the emitted
+    curve. Straight runs still come out as `<line>`, and a run that is not
+    arc-like falls back to one line per segment, so the result is never worse
+    than the default strategy.
+    """
+    pts = dedupe(points)
+    if len(pts) < 2:
+        return []
+
+    records: list[GeometryRecord] = []
+    s = 0.0
+    index = 0
+
+    while index < len(pts) - 1:
+        best_stop = index + 1
+        best: tuple[str, float, float, float] | None = None
+
+        for stop in range(index + 2, len(pts)):
+            if _run_is_straight(pts, index, stop, math.inf, chord_tolerance):
+                best_stop, best = stop, ("line", 0.0, 0.0, 0.0)
+                continue
+            fitted = _fit_arc(pts, index, stop, chord_tolerance)
+            if fitted is None:
+                break
+            curvature, length, heading_ = fitted
+            if abs(curvature) < min_curvature:
+                best_stop, best = stop, ("line", 0.0, 0.0, 0.0)
+            else:
+                best_stop, best = stop, ("arc", curvature, length, heading_)
+
+        start = pts[index]
+        if best is None or best[0] == "line":
+            end = pts[best_stop]
+            length = distance2((start[0], start[1]), (end[0], end[1]))
+            hdg = heading((start[0], start[1]), (end[0], end[1]))
+            records.append(
+                GeometryRecord(s=s, x=start[0], y=start[1], hdg=hdg, length=length, kind="line")
+            )
+        else:
+            _kind, curvature, length, hdg = best
+            records.append(
+                GeometryRecord(
+                    s=s,
+                    x=start[0],
+                    y=start[1],
+                    hdg=hdg,
+                    length=length,
+                    kind="arc",
+                    params={"curvature": curvature},
+                )
+            )
+        s += length
+        index = best_stop
+
+    return records
+
+
+# --------------------------------------------------------------------------
+# Cubic (paramPoly3) fitting
+# --------------------------------------------------------------------------
+
+
+def vertex_headings(pts: Sequence[Vec3]) -> list[float]:
+    """A heading per vertex, averaged across the two adjoining segments.
+
+    Sharing one heading between the segment that ends at a vertex and the one
+    that starts there is what makes the emitted curve C1-continuous.
+    """
+    segment = headings(pts)
+    if not segment:
+        return [0.0]
+    out = [segment[0]]
+    for before, after in pairwise(segment):
+        # Average as unit vectors so the wrap at +/-pi behaves.
+        x = math.cos(before) + math.cos(after)
+        y = math.sin(before) + math.sin(after)
+        out.append(math.atan2(y, x) if (x or y) else before)
+    out.append(segment[-1])
+    return out
+
+
+def _hermite_length(
+    au: float,
+    bu: float,
+    cu: float,
+    du: float,
+    av: float,
+    bv: float,
+    cv: float,
+    dv: float,
+    samples: int = 256,
+) -> float:
+    """Arc length of the cubic by Simpson's rule.
+
+    Computed here as well as by the backend so the `s` we write and the length
+    it derives agree; at this sample count they match to well under a micrometre.
+    """
+    del au, av
+
+    def speed(p: float) -> float:
+        return math.hypot(bu + 2 * cu * p + 3 * du * p * p, bv + 2 * cv * p + 3 * dv * p * p)
+
+    n = samples if samples % 2 == 0 else samples + 1
+    h = 1.0 / n
+    total = speed(0.0) + speed(1.0)
+    for i in range(1, n):
+        total += speed(i * h) * (4.0 if i % 2 else 2.0)
+    return total * h / 3.0
+
+
+def param_poly3_geometries(points: Sequence[Vec3]) -> list[GeometryRecord]:
+    """One cubic Hermite `<paramPoly3>` per segment, C1-continuous throughout.
+
+    Endpoints are still exact -- only the path between them is a curve rather
+    than a straight line, which is the point: the heading no longer jumps at
+    vertices.
+    """
+    pts = dedupe(points)
+    if len(pts) < 2:
+        return []
+
+    vertex = vertex_headings(pts)
+    records: list[GeometryRecord] = []
+    s = 0.0
+
+    for i in range(len(pts) - 1):
+        a, b = pts[i], pts[i + 1]
+        h0, h1 = vertex[i], vertex[i + 1]
+        chord = distance2((a[0], a[1]), (b[0], b[1]))
+        if chord <= 0.0:
+            continue
+
+        # Work in the local frame: origin at `a`, u-axis along h0.
+        cos0, sin0 = math.cos(-h0), math.sin(-h0)
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        bl_x = dx * cos0 - dy * sin0
+        bl_y = dx * sin0 + dy * cos0
+
+        relative = angle_difference(h0, h1)
+        t0x, t0y = chord, 0.0
+        t1x, t1y = chord * math.cos(relative), chord * math.sin(relative)
+
+        au, bu = 0.0, t0x
+        cu = 3.0 * bl_x - 2.0 * t0x - t1x
+        du = -2.0 * bl_x + t0x + t1x
+        av, bv = 0.0, t0y
+        cv = 3.0 * bl_y - 2.0 * t0y - t1y
+        dv = -2.0 * bl_y + t0y + t1y
+
+        length = _hermite_length(au, bu, cu, du, av, bv, cv, dv)
+        records.append(
+            GeometryRecord(
+                s=s,
+                x=a[0],
+                y=a[1],
+                hdg=h0,
+                length=length,
+                kind="paramPoly3",
+                params={
+                    "au": au,
+                    "bu": bu,
+                    "cu": cu,
+                    "du": du,
+                    "av": av,
+                    "bv": bv,
+                    "cv": cv,
+                    "dv": dv,
+                },
+            )
+        )
+        s += length
+
+    return records
+
+
 def build_plan_view(
     points: Sequence[Vec3],
     *,
+    fit: str = "line",
     heading_tolerance: float = 1e-6,
     chord_tolerance: float = 1e-4,
 ) -> tuple[list[GeometryRecord], list[Vec3]]:
@@ -126,6 +392,10 @@ def build_plan_view(
     simplified = merge_collinear(
         points, heading_tolerance=heading_tolerance, chord_tolerance=chord_tolerance
     )
+    if fit == "arc":
+        return arc_geometries(simplified, chord_tolerance=chord_tolerance), simplified
+    if fit == "parampoly3":
+        return param_poly3_geometries(simplified), simplified
     return line_geometries(simplified), simplified
 
 

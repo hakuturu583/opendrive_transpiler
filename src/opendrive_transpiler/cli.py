@@ -79,26 +79,31 @@ def build_parser() -> argparse.ArgumentParser:
     geometry = parser.add_argument_group("geometry")
     geometry.add_argument(
         "--reference-line",
-        choices=["left-bound"],
+        choices=["left-bound", "centerline"],
         default="left-bound",
         help=(
-            "what the planView follows. Only 'left-bound' (the exact outer-left "
-            "boundary) is implemented; a centerline reference is not yet available"
+            "what the planView follows: 'left-bound' (the exact outer-left "
+            "boundary, default) or 'centerline' (lanes on both sides)"
         ),
     )
     geometry.add_argument(
         "--fit",
-        choices=["line"],
+        choices=["line", "arc", "parampoly3"],
         default="line",
         help=(
-            "planView fitting. Only 'line' (exact, one <line> per segment) is "
-            "implemented; arc/spiral/paramPoly3 fitting is not yet available"
+            "planView fitting: 'line' (exact, one <line> per segment, default), "
+            "'arc' (circular arcs) or 'parampoly3' (C1-continuous cubics)"
         ),
     )
     geometry.add_argument("--point-tolerance", type=float, default=1e-3, metavar="M")
     geometry.add_argument("--chord-tolerance", type=float, default=1e-4, metavar="M")
     geometry.add_argument("--heading-tolerance", type=float, default=1e-6, metavar="RAD")
     geometry.add_argument("--width-sample-step", type=float, default=5.0, metavar="M")
+    geometry.add_argument(
+        "--cubic-profiles",
+        action="store_true",
+        help="fit one cubic per width/elevation profile where it fits within tolerance",
+    )
 
     header = parser.add_argument_group("header")
     header.add_argument("--geo-reference", default=None, help="override the PROJ string")
@@ -129,6 +134,7 @@ def options_from(args: argparse.Namespace) -> TranspileOptions:
         heading_tolerance=args.heading_tolerance,
         chord_tolerance=args.chord_tolerance,
         width_sample_step=args.width_sample_step,
+        cubic_profiles=args.cubic_profiles,
         name=args.name,
         geo_reference=args.geo_reference,
         emit_geo_reference=args.emit_geo_reference,

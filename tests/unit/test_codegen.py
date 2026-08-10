@@ -166,22 +166,125 @@ def test_an_empty_map_still_produces_a_valid_script():
 
 
 # --------------------------------------------------------------------------
-# Options that are planned but not implemented
+# Option validation
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "field,value",
-    [("reference_line", "centerline"), ("fit", "arc"), ("fit", "parampoly3")],
+    [
+        ("reference_line", "left-bound"),
+        ("reference_line", "centerline"),
+        ("fit", "line"),
+        ("fit", "arc"),
+        ("fit", "parampoly3"),
+    ],
 )
-def test_planned_options_are_refused_rather_than_silently_ignored(field: str, value: str):
-    """Accepting a flag and doing something else is the failure mode to avoid."""
-    options = TranspileOptions(**{field: value})
-    with pytest.raises(ValueError, match="not implemented yet"):
-        options.validate()
+def test_implemented_options_are_accepted(field: str, value: str):
+    TranspileOptions(**{field: value}).validate()
 
 
 @pytest.mark.parametrize("field,value", [("reference_line", "middle"), ("fit", "bezier")])
 def test_nonsense_options_are_refused(field: str, value: str):
     with pytest.raises(ValueError, match="invalid"):
         TranspileOptions(**{field: value}).validate()
+
+
+def test_a_planned_option_value_would_be_refused_not_ignored():
+    """The guard itself, exercised through a temporarily-planned value.
+
+    Every value is implemented today, so this pins the mechanism rather than a
+    particular option: adding a new planned value must refuse it, not quietly
+    fall back to the default.
+    """
+    options = TranspileOptions()
+    options.PLANNED_FITS = ("spiral",)
+    options.fit = "spiral"
+    with pytest.raises(ValueError, match="not implemented yet"):
+        options.validate()
+
+
+# --------------------------------------------------------------------------
+# Alternative geometry strategies
+# --------------------------------------------------------------------------
+
+
+CURVE = (
+    "import math\n"
+    "from lanelet2.core import Lanelet, LineString3d, Point3d, getId\n"
+    "inner, outer = [], []\n"
+    "for step in range(13):\n"
+    "    angle = math.radians(90.0 * step / 12)\n"
+    "    inner.append(Point3d(getId(), 38.0 * math.cos(angle), 38.0 * math.sin(angle), 0.0))\n"
+    "    outer.append(Point3d(getId(), 42.0 * math.cos(angle), 42.0 * math.sin(angle), 0.0))\n"
+    "ll = Lanelet(getId(), LineString3d(getId(), inner), LineString3d(getId(), outer))\n"
+    "ll.attributes['subtype'] = 'road'\n"
+)
+
+
+def test_arc_fitting_emits_arcs_for_a_curve():
+    code = generate(CURVE, fit="arc")
+    assert "xodr.Arc(" in code
+    assert code.count("add_fixed_geometry") < 12  # collapsed, not one per segment
+
+
+def test_parampoly3_fitting_emits_cubics():
+    code = generate(CURVE, fit="parampoly3")
+    assert "xodr.ParamPoly3(" in code
+
+
+def test_line_fitting_stays_the_default_and_emits_only_lines():
+    code = generate(CURVE)
+    assert "xodr.Line(" in code
+    assert "xodr.Arc(" not in code and "xodr.ParamPoly3(" not in code
+
+
+TWO_LANE = (
+    "from lanelet2.core import Lanelet, LineString3d, Point3d, getId\n"
+    "top = [Point3d(getId(), i * 20.0, 3.5, 0.0) for i in range(3)]\n"
+    "mid = [Point3d(getId(), i * 20.0, 0.0, 0.0) for i in range(3)]\n"
+    "bot = [Point3d(getId(), i * 20.0, -3.5, 0.0) for i in range(3)]\n"
+    "shared = LineString3d(getId(), mid)\n"
+    "a = Lanelet(getId(), LineString3d(getId(), top), shared)\n"
+    "b = Lanelet(getId(), shared, LineString3d(getId(), bot))\n"
+    "a.attributes['subtype'] = 'road'\n"
+    "b.attributes['subtype'] = 'road'\n"
+)
+
+
+def test_centerline_reference_puts_lanes_on_both_sides():
+    """With the reference down the middle, the two lanes straddle it as +1/-1."""
+    code = generate(TWO_LANE, reference_line="centerline")
+    assert "add_left_lane(" in code
+    assert "add_right_lane(" in code
+
+
+UNEVEN_LANES = TWO_LANE.replace("i * 20.0, 3.5", "i * 20.0, 6.0").replace(
+    "i * 20.0, -3.5", "i * 20.0, -2.0"
+)
+
+
+def test_a_symmetric_cross_section_needs_no_lane_offset():
+    """The centreline lands on the shared boundary, so lane 0 is already there."""
+    assert "add_laneoffset(" not in generate(TWO_LANE, reference_line="centerline")
+
+
+def test_an_uneven_cross_section_records_where_lane_zero_sits():
+    """A 6 m lane beside a 2 m one puts the centreline off the shared boundary.
+
+    Without a laneOffset the wide lane would straddle lane 0, which is invalid;
+    the offset moves lane 0 back onto the boundary that actually divides them.
+    """
+    code = generate(UNEVEN_LANES, reference_line="centerline")
+    assert "add_laneoffset(" in code
+    assert "add_left_lane(" in code and "add_right_lane(" in code
+
+
+def test_a_boundary_reference_never_needs_a_lane_offset():
+    assert "add_laneoffset(" not in generate(UNEVEN_LANES)
+
+
+def test_left_bound_reference_keeps_every_lane_on_one_side():
+    code = generate(CURVE)
+    assert "add_left_lane(" not in code
+    assert "add_right_lane(" in code

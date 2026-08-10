@@ -195,6 +195,12 @@ class ScenarioGenerationEmitter:
 
         writer.blank()
         writer.line(f"lanes_{rid} = xodr.Lanes()")
+        for offset in road.lane_offsets:
+            writer.line(
+                f"lanes_{rid}.add_laneoffset(xodr.LaneOffset("
+                f"s={literal(offset.s)}, a={literal(offset.a)}, b={literal(offset.b)}, "
+                f"c={literal(offset.c)}, d={literal(offset.d)}))"
+            )
         for section_index, section in enumerate(road.lane_sections):
             self._lane_section(writer, rid, section_index, section)
 
@@ -222,6 +228,16 @@ class ScenarioGenerationEmitter:
                 f"road_{rid}.add_elevation({literal(elevation.s)}, {literal(elevation.a)}, "
                 f"{literal(elevation.b)}, {literal(elevation.c)}, {literal(elevation.d)})"
             )
+
+        # A flat road produces a single zero record, which says nothing; only a
+        # genuinely banked one is worth writing out.
+        if any(any((r.a, r.b, r.c, r.d)) for r in road.superelevations):
+            for banking in road.superelevations:
+                writer.line(
+                    f"road_{rid}.add_superelevation({literal(banking.s)}, "
+                    f"{literal(banking.a)}, {literal(banking.b)}, "
+                    f"{literal(banking.c)}, {literal(banking.d)})"
+                )
 
         links = ((road.predecessor, "add_predecessor"), (road.successor, "add_successor"))
         for link, method in links:

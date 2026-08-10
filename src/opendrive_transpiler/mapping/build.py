@@ -34,8 +34,15 @@ from ..diagnostics import (
 )
 from ..geometry.fit import build_plan_view, merge_collinear, signed_side
 from ..geometry.polyline import dedupe, sample_stations, station_of_point, total_length
-from ..geometry.profile import lane_widths, road_elevation
+from ..geometry.profile import (
+    build_profile,
+    lane_widths,
+    offsets_along,
+    road_elevation,
+    road_superelevation,
+)
 from ..geometry.vec import Vec3
+from ..ir.centerline import centerline_coords
 from ..ir.model import LaneletIR, MapIR
 from ..odr.model import (
     LaneSectionSpec,
@@ -188,17 +195,14 @@ class _RoadBuilder:
         if not chain.groups:
             return None
 
-        group_refs: list[list[Vec3]] = []
-        for group in chain.groups:
-            leader = lanelets[group.members[0]]
-            reference, _right, _la, _ra = self.oriented_bounds(leader)
-            group_refs.append(
-                merge_collinear(
-                    reference,
-                    heading_tolerance=self.options.heading_tolerance,
-                    chord_tolerance=self.options.chord_tolerance,
-                )
+        group_refs: list[list[Vec3]] = [
+            merge_collinear(
+                self._group_reference(group),
+                heading_tolerance=self.options.heading_tolerance,
+                chord_tolerance=self.options.chord_tolerance,
             )
+            for group in chain.groups
+        ]
 
         concatenated: list[Vec3] = []
         for piece in group_refs:
@@ -210,6 +214,7 @@ class _RoadBuilder:
 
         geometries, reference = build_plan_view(
             concatenated,
+            fit=self.options.fit,
             heading_tolerance=self.options.heading_tolerance,
             chord_tolerance=self.options.chord_tolerance,
         )
@@ -230,7 +235,9 @@ class _RoadBuilder:
                 reference,
                 max_step=self.options.width_sample_step,
                 tolerance=1e-9,
+                cubic=self.options.cubic_profiles,
             ),
+            superelevations=self._superelevation(chain, reference),
             road_type=tables.road_type_for(leader.subtype, leader.attributes.get("location", "")),
             speed=self._speed_for(leader),
             lanelet2_ids=tuple(lanelets[i].lanelet2_id for i in chain.lanelet_indices),
@@ -248,8 +255,89 @@ class _RoadBuilder:
                 self._build_section(group, group_refs[group_index], s, road_id)
             )
 
+        road.lane_offsets = self._lane_offsets(chain.groups[0], reference)
         _link_lane_sections(road)
         return road
+
+    def _lane_offsets(self, group: grouping.LaneGroup, reference: list[Vec3]):
+        """Where lane 0 sits relative to the reference line.
+
+        Zero whenever the reference line *is* a boundary, so the default layout
+        emits nothing. With a computed centreline no boundary lies exactly on it,
+        and this records the difference instead of quietly mislocating the lanes.
+        """
+        if self.options.reference_line != "centerline":
+            return []
+        boundaries, _attributes, _owners = self.cross_section(group)
+        center = self._center_index(boundaries, reference)
+        stations_ = sample_stations(reference, self.options.width_sample_step)
+        values = offsets_along(reference, stations_, boundaries[center])
+        records = build_profile(stations_, values, tolerance=self.options.width_tolerance)
+        if len(records) == 1 and abs(records[0].a) <= self.options.width_tolerance:
+            return []
+        return records
+
+    # -- cross-section ------------------------------------------------------
+    def cross_section(
+        self, group: grouping.LaneGroup
+    ) -> tuple[list[list[Vec3]], list[dict[str, str]], list[LaneletIR]]:
+        """A lane group as an ordered left-to-right stack of boundaries.
+
+        For members `m0..mn` the boundaries are `m0.left, m0.right, m1.right, …`,
+        so lane `k` lies between boundary `k` and `k+1` and belongs to `m_k`.
+        Expressing a cross-section this way is what lets the reference line sit
+        anywhere in the stack rather than only at its left edge.
+        """
+        lanelets = self.ir.lanelets
+        boundaries: list[list[Vec3]] = []
+        attributes: list[dict[str, str]] = []
+        owners: list[LaneletIR] = []
+
+        for position, member in enumerate(group.members):
+            lanelet = lanelets[member]
+            left, right, left_attrs, right_attrs = self.oriented_bounds(lanelet)
+            if position == 0:
+                boundaries.append(left)
+                attributes.append(left_attrs)
+            boundaries.append(right)
+            attributes.append(right_attrs)
+            owners.append(lanelet)
+
+        return boundaries, attributes, owners
+
+    def _group_reference(self, group: grouping.LaneGroup) -> list[Vec3]:
+        """The polyline the planView follows for this cross-section."""
+        boundaries, _attributes, _owners = self.cross_section(group)
+        if self.options.reference_line == "centerline" and len(boundaries) >= 2:
+            # The centre of the whole cross-section, using lanelet2's own
+            # algorithm so a script that reads `lanelet.centerline` and the
+            # emitted reference line agree.
+            return centerline_coords(boundaries[0], boundaries[-1]) or boundaries[0]
+        return boundaries[0]
+
+    def _center_index(self, boundaries: list[list[Vec3]], reference: list[Vec3]) -> int:
+        """Which boundary lane 0 sits on: the one nearest the reference line."""
+        if self.options.reference_line != "centerline":
+            return 0
+        stations_ = sample_stations(reference, self.options.width_sample_step)
+        offsets = [
+            sum(abs(t) for t in offsets_along(reference, stations_, bound)) / max(len(stations_), 1)
+            for bound in boundaries
+        ]
+        return min(range(len(offsets)), key=lambda i: offsets[i])
+
+    def _superelevation(self, chain: grouping.RoadChain, reference: list[Vec3]):
+        """Roll angle from the height difference across the widest cross-section."""
+        boundaries, _attributes, _owners = self.cross_section(chain.groups[0])
+        if len(boundaries) < 2:
+            return []
+        return road_superelevation(
+            reference,
+            boundaries[0],
+            boundaries[-1],
+            max_step=self.options.width_sample_step,
+            cubic=self.options.cubic_profiles,
+        )
 
     def _build_section(
         self,
@@ -258,72 +346,99 @@ class _RoadBuilder:
         s: float,
         road_id: int,
     ) -> LaneSectionSpec:
-        lanelets = self.ir.lanelets
-        leader = lanelets[group.members[0]]
-        _left, _right, left_attrs, _right_attrs = self.oriented_bounds(leader)
+        boundaries, attributes, owners = self.cross_section(group)
+        center = self._center_index(boundaries, local_reference)
 
-        center_mark, known = tables.road_mark_for(left_attrs, self.options)
-        if not known:
-            self.bag.warn(
-                W_UNKNOWN_ROADMARK,
-                f"road {road_id}: boundary tags {center_mark.source!r} have no roadMark "
-                "mapping; emitted as the nearest equivalent",
-            )
+        center_mark = self._road_mark(attributes[center], f"road {road_id} centre")
         section = LaneSectionSpec(s=s, center_road_mark=center_mark)
 
         stations_ = sample_stations(local_reference, self.options.width_sample_step)
 
-        for offset, member in enumerate(group.members, start=1):
-            lanelet = lanelets[member]
-            inner, outer, _inner_attrs, outer_attrs = self.oriented_bounds(lanelet)
-            widths, minimum = lane_widths(
-                local_reference,
-                inner,
-                outer,
-                tolerance=self.options.width_tolerance,
+        # Lanes above the reference line run outward as +1, +2, …; lanes below it
+        # as -1, -2, …. With a boundary reference (`center == 0`) there is
+        # nothing above, which is the single-sided layout the default produces.
+        for position in range(len(owners)):
+            inner_index, outer_index = position, position + 1
+            if position < center:
+                lane_id = center - position
+                # Going left, the *inner* edge is the one nearer the reference.
+                inner_index, outer_index = position + 1, position
+            else:
+                lane_id = -(position - center + 1)
+
+            lane = self._build_lane(
+                lane_id=lane_id,
+                lanelet=owners[position],
+                inner=boundaries[inner_index],
+                outer=boundaries[outer_index],
+                outer_attrs=attributes[outer_index],
+                local_reference=local_reference,
                 stations_=stations_,
             )
-            if minimum < 0.0:
-                self.bag.warn(
-                    W_NEGATIVE_WIDTH,
-                    f"lanelet #{lanelet.lanelet2_id}: bounds cross over "
-                    f"(minimum width {minimum:.4g} m)",
-                )
+            (section.left if lane_id > 0 else section.right).append(lane)
 
-            lane_type, recognised = tables.lane_type_for(lanelet.subtype)
-            if not lanelet.subtype:
-                self.bag.warn(
-                    W_EMPTY_SUBTYPE,
-                    f"lanelet #{lanelet.lanelet2_id} has no 'subtype' tag; "
-                    f"assuming lane type {lane_type!r}",
-                )
-            elif not recognised:
-                self.bag.warn(
-                    W_UNKNOWN_SUBTYPE,
-                    f"lanelet #{lanelet.lanelet2_id}: unknown subtype "
-                    f"{lanelet.subtype!r}; assuming lane type {lane_type!r}",
-                )
+        section.left.sort(key=lambda lane: lane.lane_id)
+        section.right.sort(key=lambda lane: -lane.lane_id)
+        return section
 
-            mark, known_mark = tables.road_mark_for(outer_attrs, self.options)
-            if not known_mark:
-                self.bag.warn(
-                    W_UNKNOWN_ROADMARK,
-                    f"lanelet #{lanelet.lanelet2_id}: boundary tags {mark.source!r} have "
-                    "no roadMark mapping; emitted as the nearest equivalent",
-                )
+    def _road_mark(self, attributes: dict[str, str], where: str):
+        mark, known = tables.road_mark_for(attributes, self.options)
+        if not known:
+            self.bag.warn(
+                W_UNKNOWN_ROADMARK,
+                f"{where}: boundary tags {mark.source!r} have no roadMark mapping; "
+                "emitted as the nearest equivalent",
+            )
+        return mark
 
-            section.right.append(
-                LaneSpec(
-                    lane_id=-offset,
-                    lane_type=lane_type,
-                    widths=widths,
-                    road_mark=mark,
-                    lanelet2_id=lanelet.lanelet2_id,
-                    subtype=lanelet.subtype,
-                )
+    def _build_lane(
+        self,
+        *,
+        lane_id: int,
+        lanelet: LaneletIR,
+        inner: list[Vec3],
+        outer: list[Vec3],
+        outer_attrs: dict[str, str],
+        local_reference: list[Vec3],
+        stations_: list[float],
+    ) -> LaneSpec:
+        widths, minimum = lane_widths(
+            local_reference,
+            inner,
+            outer,
+            tolerance=self.options.width_tolerance,
+            stations_=stations_,
+            cubic=self.options.cubic_profiles,
+        )
+        if minimum < 0.0:
+            self.bag.warn(
+                W_NEGATIVE_WIDTH,
+                f"lanelet #{lanelet.lanelet2_id}: bounds cross over "
+                f"(minimum width {minimum:.4g} m)",
             )
 
-        return section
+        lane_type, recognised = tables.lane_type_for(lanelet.subtype)
+        if not lanelet.subtype:
+            self.bag.warn(
+                W_EMPTY_SUBTYPE,
+                f"lanelet #{lanelet.lanelet2_id} has no 'subtype' tag; "
+                f"assuming lane type {lane_type!r}",
+            )
+        elif not recognised:
+            self.bag.warn(
+                W_UNKNOWN_SUBTYPE,
+                f"lanelet #{lanelet.lanelet2_id}: unknown subtype "
+                f"{lanelet.subtype!r}; assuming lane type {lane_type!r}",
+            )
+
+        return LaneSpec(
+            lane_id=lane_id,
+            lane_type=lane_type,
+            widths=widths,
+            road_mark=self._road_mark(outer_attrs, f"lanelet #{lanelet.lanelet2_id}"),
+            lanelet2_id=lanelet.lanelet2_id,
+            subtype=lanelet.subtype,
+        )
 
     def _speed_for(self, lanelet: LaneletIR) -> tuple[float, str] | None:
         raw = lanelet.attributes.get("speed_limit", "")

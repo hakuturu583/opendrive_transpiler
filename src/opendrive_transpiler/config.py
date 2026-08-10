@@ -41,15 +41,27 @@ class TranspileOptions:
     reference_line: str = "left-bound"
     """What the planView follows.
 
-    Only "left-bound" (the leftmost lanelet's outer-left boundary, reproduced
-    exactly) is implemented. "centerline" is planned and is rejected rather than
-    silently ignored: it would have to split each lanelet into +1/-1 half-width
-    lanes, which is a different lane layout, not a different curve.
+    "left-bound" follows the leftmost lanelet's outer-left boundary, which is
+    real input geometry and so is reproduced exactly; every lane then sits to its
+    right as -1, -2, ….
+
+    "centerline" follows the computed centre of the cross-section, so lanes fall
+    on both sides as +1/-1, and `<laneOffset>` records where lane 0 actually
+    sits. Exact only where the centreline happens to pass through vertices.
     """
 
     fit: str = "line"
-    """planView fitting. Only "line" is implemented; "arc" and "parampoly3" are
-    planned and are rejected rather than silently downgraded to "line"."""
+    """planView fitting.
+
+    "line" reproduces the input exactly, one `<line>` per segment, at the cost of
+    a heading discontinuity at each vertex. "arc" greedily fits circular arcs,
+    and "parampoly3" fits C1-continuous cubics; both trade up to
+    `chord_tolerance` of positional error for curvature continuity.
+    """
+
+    cubic_profiles: bool = False
+    """Fit one cubic across a width/elevation profile when it fits within
+    tolerance, instead of emitting piecewise-linear records."""
 
     heading_tolerance: float = 1e-6
     """Radians. Consecutive segments within this heading delta may merge."""
@@ -94,10 +106,10 @@ class TranspileOptions:
     # Values the options accept today, as opposed to values that are planned.
     # Accepting a planned value and quietly doing something else is the one
     # failure mode this whole package is built to avoid.
-    IMPLEMENTED_REFERENCE_LINES = ("left-bound",)
-    PLANNED_REFERENCE_LINES = ("centerline",)
-    IMPLEMENTED_FITS = ("line",)
-    PLANNED_FITS = ("arc", "parampoly3")
+    IMPLEMENTED_REFERENCE_LINES = ("left-bound", "centerline")
+    PLANNED_REFERENCE_LINES = ()
+    IMPLEMENTED_FITS = ("line", "arc", "parampoly3")
+    PLANNED_FITS = ()
 
     def validate(self) -> None:
         if self.on_unknown_branch not in {"then", "else", "error"}:

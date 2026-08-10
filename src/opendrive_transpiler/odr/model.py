@@ -108,6 +108,11 @@ class RoadSpec:
     geometries: list[GeometryRecord] = field(default_factory=list)
     lane_sections: list[LaneSectionSpec] = field(default_factory=list)
     elevations: list[PolyRecord] = field(default_factory=list)
+    superelevations: list[PolyRecord] = field(default_factory=list)
+    lane_offsets: list[PolyRecord] = field(default_factory=list)
+    """`<laneOffset>`: where lane 0 sits relative to the reference line. Zero by
+    construction when the reference line *is* a boundary, non-zero when it is a
+    computed centerline that no boundary lies exactly on."""
     road_type: str = "unknown"
     speed: tuple[float, str] | None = None
     """(value, unit) for the `<type><speed>` record."""
