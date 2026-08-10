@@ -19,12 +19,22 @@ installed** to convert a map — and the input script is never executed.
 ## Install
 
 ```bash
-pip install opendrive-transpiler            # the transpiler: zero dependencies
-pip install "opendrive-transpiler[emit]"    # + scenariogeneration, to write .xodr
+uv add opendrive-transpiler                 # the transpiler: zero dependencies
+uv add "opendrive-transpiler[emit]"         # + scenariogeneration, to write .xodr
+
+# or, without uv
+pip install opendrive-transpiler
+pip install "opendrive-transpiler[emit]"
 ```
 
 The core only ever writes Python *text*, so it installs and runs anywhere.
 `scenariogeneration` is needed only to *run* the generated script.
+
+To try it without installing anything:
+
+```bash
+uvx --from opendrive-transpiler opendrive-transpile my_map.py
+```
 
 ## Use
 
@@ -310,18 +320,43 @@ All are configurable.
 
 ## Development
 
+The project is managed with [uv](https://docs.astral.sh/uv/). `uv.lock` is
+committed, so everyone and CI resolve to the same versions.
+
 ```bash
-pip install -e ".[dev]"
-pytest tests -q
-ruff check src tests && ruff format --check src tests
+uv sync                                   # create .venv with the full toolchain
+uv run pytest tests -q
+uv run ruff check src tests && uv run ruff format --check src tests
 
 # Regenerate the golden files after an intentional emitter change
-pytest tests/integration/test_golden.py --update-golden
+uv run pytest tests/integration/test_golden.py --update-golden
+
+uv build                                  # sdist + wheel into dist/
+uv lock --upgrade                         # refresh the lockfile
+```
+
+Dependencies are split so that the zero-dependency promise is structural rather
+than a matter of remembering:
+
+| Where | What | Who gets it |
+|---|---|---|
+| `dependencies` | *(empty)* | everyone |
+| `optional-dependencies` | `emit`, `validate` | users who ask (`pip install "…[emit]"`) |
+| `dependency-groups` | `test`, `lint`, `emit`, `validate`, `dev` | contributors only — never published |
+
+Because dependency groups are never published, the wheel a user installs cannot
+pick up a dev dependency by accident. CI checks this from both directions: one
+job syncs `--no-default-groups --group test` and asserts `scenariogeneration`,
+`numpy` and `pyxodr` are *absent* before running the suite; another builds the
+wheel, installs it alone, and transpiles a fixture with it.
+
+```bash
+# Reproduce the zero-dependency job locally
+uv run --no-default-groups --group test pytest tests -q
 ```
 
 The centerline port is checked against the golden vectors in simple_lanelet2's own
-`crates/ll2-core/src/centerline.rs` test module, and CI runs the whole suite once
-with **no optional dependencies installed** to keep the zero-dependency core honest.
+`crates/ll2-core/src/centerline.rs` test module.
 
 ## License
 

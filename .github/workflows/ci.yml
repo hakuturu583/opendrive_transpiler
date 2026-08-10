@@ -10,10 +10,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Fail rather than silently resolving something new: every job must use the
+  # versions in uv.lock, or the lockfile is not doing its job.
+  UV_FROZEN: "1"
+
 jobs:
   # The core claims to have no dependencies. This job is what makes that a
-  # claim rather than an aspiration: it installs the package with no extras at
-  # all and runs everything that does not need the emit backend.
+  # claim rather than an aspiration: it installs the project plus pytest and
+  # nothing else, then asserts the optional packages really are absent.
   bare:
     name: "zero-dependency core (py${{ matrix.python-version }})"
     runs-on: ubuntu-latest
@@ -23,29 +28,26 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install the package with no extras
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync with the test group only
+        run: uv sync --no-default-groups --group test --python ${{ matrix.python-version }}
+      - name: Confirm nothing optional leaked into the environment
         run: |
-          python -m pip install --upgrade pip
-          pip install .
-          pip install pytest
-      - name: Confirm nothing optional leaked into the install
-        run: |
-          python - <<'EOF'
+          uv run --no-sync python - <<'EOF'
           import importlib.util, sys
-          for name in ("scenariogeneration", "numpy", "lanelet2"):
+          for name in ("scenariogeneration", "numpy", "pyxodr", "lanelet2"):
               if importlib.util.find_spec(name) is not None:
                   sys.exit(f"{name} is installed; this job must prove the core runs without it")
           import opendrive_transpiler
           print("core imports cleanly:", opendrive_transpiler.__version__)
           EOF
       - name: Transpile a fixture without the emit backend
-        run: |
-          python -m opendrive_transpiler tests/fixtures/chain.py --best-effort -o /dev/null
+        run: uv run --no-sync opendrive-transpile tests/fixtures/chain.py --best-effort -o /dev/null
       - name: Run the dependency-free tests
-        run: pytest tests -q
+        run: uv run --no-sync pytest tests -q
 
   full:
     name: "full suite (py${{ matrix.python-version }})"
@@ -56,49 +58,77 @@ jobs:
         python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install with the emit and validate extras
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev,validate]"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync the full toolchain
+        run: uv sync --python ${{ matrix.python-version }}
       - name: Run everything, including the .xodr round-trip
-        run: pytest tests -q
+        run: uv run --no-sync pytest tests -q
       - name: Produce a .xodr end to end
         run: |
-          python -m opendrive_transpiler tests/fixtures/parallel_lanes.py \
+          uv run --no-sync opendrive-transpile tests/fixtures/parallel_lanes.py \
             --best-effort -o /tmp/generated.py --xodr /tmp/generated.xodr
-          python -c "import xml.etree.ElementTree as ET; ET.parse('/tmp/generated.xodr')"
+          uv run --no-sync python -c \
+            "import xml.etree.ElementTree as ET; ET.parse('/tmp/generated.xodr')"
 
   lint:
     name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
-      - run: pip install ruff
-      - run: ruff check src tests
-      - run: ruff format --check src tests
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --no-default-groups --group lint
+      - run: uv run --no-sync ruff check src tests
+      - run: uv run --no-sync ruff format --check src tests
+
+  lockfile:
+    name: lockfile is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # --locked re-resolves and fails if uv.lock would change, which catches a
+      # pyproject edit that was committed without relocking.
+      - run: uv lock --locked
 
   goldens:
     name: goldens are up to date
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync
       # Regenerating must be a no-op; a dirty tree means someone changed the
       # emitter without refreshing tests/golden.
-      - run: pytest tests/integration/test_golden.py --update-golden -q
+      - run: uv run --no-sync pytest tests/integration/test_golden.py --update-golden -q
       - name: Fail if regenerating changed anything
         run: |
           if ! git diff --quiet -- tests/golden; then
-            echo "::error::goldens are stale; run: pytest tests/integration/test_golden.py --update-golden"
+            echo "::error::goldens are stale; run: uv run pytest tests/integration/test_golden.py --update-golden"
             git --no-pager diff -- tests/golden
             exit 1
           fi
+
+  build:
+    name: wheel builds and installs clean
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      # A wheel installed on its own must still transpile: dependency groups are
+      # never published, so this is the user's real experience.
+      - name: Install the built wheel into a throwaway environment
+        run: |
+          uv venv /tmp/wheel-check
+          VIRTUAL_ENV=/tmp/wheel-check uv pip install dist/*.whl
+          VIRTUAL_ENV=/tmp/wheel-check uv run --no-project \
+            opendrive-transpile tests/fixtures/chain.py --best-effort -o /dev/null

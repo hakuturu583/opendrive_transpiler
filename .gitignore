@@ -3,8 +3,11 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# uv manages the environment; the lockfile is committed, the venv is not.
 .venv/
 venv/
+.uv/
 .pytest_cache/
 .ruff_cache/
 .coverage
