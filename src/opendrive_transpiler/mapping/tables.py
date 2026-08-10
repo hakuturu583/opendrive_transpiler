@@ -11,12 +11,12 @@ the obvious cases, and both are configurable.
 
 from __future__ import annotations
 
-import math
 import re
 
 from ..config import TranspileOptions
 from ..ir.model import ProjectionIR
 from ..odr.model import RoadMarkSpec
+from .proj import mgrs_square_offsets, utm_offsets, utm_zone
 
 # --------------------------------------------------------------------------
 # Lanelet subtype -> OpenDRIVE lane type
@@ -206,18 +206,12 @@ def speed_for(raw: str) -> tuple[float, str] | None:
 # --------------------------------------------------------------------------
 
 
-def utm_zone(longitude: float) -> int:
-    return math.floor((longitude + 180.0) / 6.0) + 1
-
-
 def geo_reference_for(projection: ProjectionIR | None) -> tuple[str | None, str | None]:
     """Returns `(proj_string, caveat)`.
 
-    `caveat` is set when the string is a faithful description of the projection
-    family but not of the exact origin offset -- notably UTM with `useOffset`,
-    where lanelet2 subtracts the origin's easting/northing and reproducing that
-    needs a real forward projection. Emitting the family and saying so beats
-    emitting a subtly wrong transform in silence.
+    `caveat` is set when the string describes the projection family faithfully
+    but something about the frame could not be reproduced. Emitting a subtly
+    wrong transform in silence would be worse than saying so.
     """
     if projection is None:
         return None, None
@@ -227,15 +221,14 @@ def geo_reference_for(projection: ProjectionIR | None) -> tuple[str | None, str 
 
     if kind == "utm":
         hemisphere = "+north" if lat >= 0 else "+south"
-        proj = f"+proj=utm +zone={utm_zone(lon)} {hemisphere} +datum=WGS84 +units=m +no_defs"
-        caveat = None
+        parts = [f"+proj=utm +zone={utm_zone(lon)}", hemisphere]
         if projection.use_offset:
-            caveat = (
-                "UtmProjector was built with useOffset=True, so map coordinates are "
-                "relative to the origin's easting/northing; the emitted geoReference "
-                "describes the UTM zone but not that offset"
-            )
-        return proj, caveat
+            # lanelet2 subtracts the origin's easting/northing, so the PROJ
+            # string has to carry that shift or it points at the wrong continent.
+            x0, y0 = utm_offsets(lat, lon)
+            parts.append(f"+x_0={x0!r} +y_0={y0!r}")
+        parts.append("+datum=WGS84 +units=m +no_defs")
+        return " ".join(parts), None
 
     if kind == "mercator":
         return (
@@ -257,6 +250,24 @@ def geo_reference_for(projection: ProjectionIR | None) -> tuple[str | None, str 
             None,
         )
 
-    # MGRS and geocentric have no single PROJ string that matches what lanelet2
-    # produced; the frontend has already reported this.
+    if kind == "mgrs":
+        # MGRS coordinates are metres inside a 100 km grid square, which is UTM
+        # shifted to that square's south-west corner.
+        x0, y0 = mgrs_square_offsets(lat, lon)
+        hemisphere = "+north" if lat >= 0 else "+south"
+        return (
+            f"+proj=utm +zone={utm_zone(lon)} {hemisphere} +x_0={x0!r} +y_0={y0!r} "
+            "+datum=WGS84 +units=m +no_defs",
+            "MGRS coordinates were reproduced as UTM offset to the origin's 100 km "
+            "square; the grid-square letters themselves are not carried in PROJ",
+        )
+
+    if kind == "geocentric":
+        # Geocentric is a 3D earth-centred frame, not a map projection: there is
+        # no 2D PROJ string that means the same thing.
+        return None, (
+            "geocentric coordinates are earth-centred XYZ, which has no planar PROJ "
+            "equivalent; <geoReference> omitted"
+        )
+
     return None, f"{kind} projection has no PROJ equivalent"

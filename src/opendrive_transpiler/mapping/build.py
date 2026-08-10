@@ -18,6 +18,8 @@ OpenDRIVE permits an off-centre reference line, and consumers handle it.
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 from ..config import TranspileOptions
 from ..diagnostics import (
     I_GEO_REFERENCE,
@@ -54,7 +56,7 @@ from ..odr.model import (
 )
 from ..topology import grouping, relations
 from ..topology.index import NodeIndex
-from . import tables
+from . import junctions, tables
 
 
 def build_model(
@@ -81,9 +83,9 @@ def build_model(
     rels = relations.infer(ir.lanelets, index)
     network = grouping.build(ir.lanelets, rels)
 
-    _report_topology(network, ir, bag)
+    _report_topology(network, ir, bag, options)
 
-    builder = _RoadBuilder(ir, options, bag)
+    builder = _RoadBuilder(ir, options, bag, rels)
     chain_of_group: dict[int, int] = {}
     for chain_index, chain in enumerate(network.chains):
         for group in chain.groups:
@@ -94,6 +96,10 @@ def build_model(
         roads.append(builder.build_road(chain, road_id=chain_index + 1))
 
     _link_roads(network, rels, roads, bag)
+
+    if options.junctions:
+        model.junctions = junctions.build(network, rels, roads, ir, bag)
+        stats.junctions = len(model.junctions)
 
     for road in roads:
         if road is None:
@@ -135,14 +141,18 @@ def _apply_geo_reference(
         )
 
 
-def _report_topology(network: grouping.Network, ir: MapIR, bag: DiagnosticBag) -> None:
-    if network.branch_lanelets:
+def _report_topology(
+    network: grouping.Network,
+    ir: MapIR,
+    bag: DiagnosticBag,
+    options: TranspileOptions,
+) -> None:
+    if network.branch_lanelets and not options.junctions:
         names = ", ".join(f"#{ir.lanelets[i].lanelet2_id}" for i in network.branch_lanelets)
         bag.info(
             I_JUNCTION_SKIPPED,
-            f"branch/merge at lanelet(s) {names}; each branch ends a road and junction "
-            "generation is not enabled in this release, so these roads are emitted "
-            "unconnected",
+            f"branch/merge at lanelet(s) {names}; junction generation is disabled, "
+            "so these roads are emitted unconnected",
         )
     for left, right in network.two_way_pairs:
         bag.info(
@@ -159,10 +169,17 @@ def _report_topology(network: grouping.Network, ir: MapIR, bag: DiagnosticBag) -
 
 
 class _RoadBuilder:
-    def __init__(self, ir: MapIR, options: TranspileOptions, bag: DiagnosticBag) -> None:
+    def __init__(
+        self,
+        ir: MapIR,
+        options: TranspileOptions,
+        bag: DiagnosticBag,
+        rels: relations.Relations,
+    ) -> None:
         self.ir = ir
         self.options = options
         self.bag = bag
+        self.rels = rels
         self._swap_reported: set[int] = set()
 
     # -- orientation -------------------------------------------------------
@@ -256,7 +273,7 @@ class _RoadBuilder:
             )
 
         road.lane_offsets = self._lane_offsets(chain.groups[0], reference)
-        _link_lane_sections(road)
+        self._link_lane_sections(road, chain)
         return road
 
     def _lane_offsets(self, group: grouping.LaneGroup, reference: list[Vec3]):
@@ -440,6 +457,31 @@ class _RoadBuilder:
             subtype=lanelet.subtype,
         )
 
+    def _link_lane_sections(self, road: RoadSpec, chain: grouping.RoadChain) -> None:
+        """Link lanes across consecutive sections by *lanelet* succession.
+
+        A road may change lane count between sections, so matching lane ids
+        would link the wrong lanes -- or miss a lane that shifted from -2 to -1
+        when its neighbour ended. The lanelet successor relation is the ground
+        truth, and it is what carried the sections into one road in the first
+        place.
+        """
+        ids = {lanelet.lanelet2_id: index for index, lanelet in enumerate(self.ir.lanelets)}
+
+        for previous, following in pairwise(road.lane_sections):
+            by_lanelet = {lane.lanelet2_id: lane for lane in following.lanes}
+            for lane in previous.lanes:
+                index = ids.get(lane.lanelet2_id)
+                if index is None:
+                    continue
+                for successor in self.rels.successor_of(index):
+                    counterpart = by_lanelet.get(self.ir.lanelets[successor].lanelet2_id)
+                    if counterpart is not None:
+                        lane.successor = counterpart.lane_id
+                        counterpart.predecessor = lane.lane_id
+                        break
+        del chain
+
     def _speed_for(self, lanelet: LaneletIR) -> tuple[float, str] | None:
         raw = lanelet.attributes.get("speed_limit", "")
         if not raw:
@@ -459,21 +501,6 @@ class _RoadBuilder:
         if len(ids) == 1:
             return f"lanelet_{ids[0]}"
         return f"lanelets_{ids[0]}_{ids[-1]}"
-
-
-def _link_lane_sections(road: RoadSpec) -> None:
-    """Link matching lane ids across consecutive lane sections of one road.
-
-    Chains are built with a constant lane count, so lane -k always continues as
-    lane -k; anything else would have ended the chain.
-    """
-    for previous, following in zip(road.lane_sections, road.lane_sections[1:], strict=False):
-        by_id = {lane.lane_id: lane for lane in following.lanes}
-        for lane in previous.lanes:
-            counterpart = by_id.get(lane.lane_id)
-            if counterpart is not None:
-                lane.successor = counterpart.lane_id
-                counterpart.predecessor = lane.lane_id
 
 
 def _link_roads(

@@ -3,9 +3,8 @@
 source:  tests/fixtures/with_projector.py
 sha256:  1f40d8c8db756d41e40719cc646ca5c42f8b0d542f6a7d1467b5dcf173c52ed8
 summary: 1/1 lanelets converted, 1 roads, 1 lanes, 1 regulatory elements skipped
-notices: 2 info(s)
+notices: 1 info(s)
     LL2ODR-I902: 1 regulatory element(s) recognised (TrafficLight); signals and priorities are not converted yet
-    LL2ODR-I908: UtmProjector was built with useOffset=True, so map coordinates are relative to the origin's easting/northing; the emitted geoReference describes the UTM zone but not that offset
 note:    geoReference derived from utm projector at lat=49.0, lon=8.4
 
 Run this file to write with_projector.xodr. Requires scenariogeneration:
@@ -17,7 +16,7 @@ from scenariogeneration import xodr
 
 def build() -> xodr.OpenDrive:
     """Build the OpenDRIVE model transpiled from tests/fixtures/with_projector.py."""
-    odr = xodr.OpenDrive('with_projector', revMajor='1', revMinor='5', geo_reference='+proj=utm +zone=32 +north +datum=WGS84 +units=m +no_defs')
+    odr = xodr.OpenDrive('with_projector', revMajor='1', revMinor='5', geo_reference='+proj=utm +zone=32 +north +x_0=43885.40413814678 +y_0=-5427629.203876308 +datum=WGS84 +units=m +no_defs')
 
     # ---- road 1  <-  lanelet #30 ---------------------------------------
     # reference line: 1 geometry record(s), length 12.0416 m

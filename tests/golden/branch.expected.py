@@ -3,8 +3,7 @@
 source:  tests/fixtures/branch.py
 sha256:  a20d250d76122d20b1e5161a353b46c86a211443753c892f8f05ed521a01e00f
 summary: 3/3 lanelets converted, 3 roads, 3 lanes
-notices: 1 info(s)
-    LL2ODR-I901: branch/merge at lanelet(s) #5; each branch ends a road and junction generation is not enabled in this release, so these roads are emitted unconnected
+notices: none
 
 Run this file to write branch.xodr. Requires scenariogeneration:
     pip install "opendrive-transpiler[emit]"
@@ -37,6 +36,7 @@ def build() -> xodr.OpenDrive:
     road_1 = xodr.Road(1, pv_1, lanes_1, name='lanelet_5')
     road_1.add_type(xodr.RoadType.unknown, 0.0)
     road_1.add_elevation(0.0, 0.0, 0.0, 0.0, 0.0)
+    road_1.add_successor(xodr.ElementType.junction, 1)
     odr.add_road(road_1)
 
     # ---- road 2  <-  lanelet #8 ----------------------------------------
@@ -56,9 +56,10 @@ def build() -> xodr.OpenDrive:
     ls_2_0.add_right_lane(lane_2_0_m1)
     lanes_2.add_lanesection(ls_2_0)
 
-    road_2 = xodr.Road(2, pv_2, lanes_2, name='lanelet_8')
+    road_2 = xodr.Road(2, pv_2, lanes_2, road_type=1, name='lanelet_8')
     road_2.add_type(xodr.RoadType.unknown, 0.0)
     road_2.add_elevation(0.0, 0.0, 0.0, 0.0, 0.0)
+    road_2.add_predecessor(xodr.ElementType.road, 1, contact_point=xodr.ContactPoint.end)
     odr.add_road(road_2)
 
     # ---- road 3  <-  lanelet #13 ---------------------------------------
@@ -78,10 +79,21 @@ def build() -> xodr.OpenDrive:
     ls_3_0.add_right_lane(lane_3_0_m1)
     lanes_3.add_lanesection(ls_3_0)
 
-    road_3 = xodr.Road(3, pv_3, lanes_3, name='lanelet_13')
+    road_3 = xodr.Road(3, pv_3, lanes_3, road_type=1, name='lanelet_13')
     road_3.add_type(xodr.RoadType.unknown, 0.0)
     road_3.add_elevation(0.0, 0.0, 0.0, 0.0, 0.0)
+    road_3.add_predecessor(xodr.ElementType.road, 1, contact_point=xodr.ContactPoint.end)
     odr.add_road(road_3)
+
+    # ---- junction 1  (2 connection(s)) ---------------------------------
+    junction_1 = xodr.Junction('junction_1', 1)
+    conn_1_0 = xodr.Connection(1, 2, xodr.ContactPoint.start)
+    conn_1_0.add_lanelink(-1, -1)
+    junction_1.add_connection(conn_1_0)
+    conn_1_1 = xodr.Connection(1, 3, xodr.ContactPoint.start)
+    conn_1_1.add_lanelink(-1, -1)
+    junction_1.add_connection(conn_1_1)
+    odr.add_junction(junction_1)
 
     # Geometry is already fixed to the input coordinates, so this only derives lane links; it will not move anything.
     odr.adjust_roads_and_lanes()

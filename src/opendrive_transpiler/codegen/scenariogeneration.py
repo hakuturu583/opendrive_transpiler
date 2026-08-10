@@ -104,6 +104,9 @@ class ScenarioGenerationEmitter:
             for road in model.roads:
                 writer.blank()
                 self._road(writer, road)
+            for junction in model.junctions:
+                writer.blank()
+                self._junction(writer, junction)
             writer.blank()
             if model.roads:
                 writer.comment(
@@ -249,6 +252,22 @@ class ScenarioGenerationEmitter:
             writer.line(f"road_{rid}.{method}({', '.join(args)})")
 
         writer.line(f"odr.add_road(road_{rid})")
+
+    def _junction(self, writer: SourceWriter, junction) -> None:
+        jid = junction.junction_id
+        writer.rule(f"junction {jid}  ({len(junction.connections)} connection(s))")
+        writer.line(f"junction_{jid} = xodr.Junction({literal(junction.name)}, {literal(jid)})")
+        for index, connection in enumerate(junction.connections):
+            name = f"conn_{jid}_{index}"
+            writer.line(
+                f"{name} = xodr.Connection({literal(connection.incoming_road)}, "
+                f"{literal(connection.connecting_road)}, "
+                f"xodr.ContactPoint.{connection.contact_point})"
+            )
+            for incoming, outgoing in connection.lane_links:
+                writer.line(f"{name}.add_lanelink({literal(incoming)}, {literal(outgoing)})")
+            writer.line(f"junction_{jid}.add_connection({name})")
+        writer.line(f"odr.add_junction(junction_{jid})")
 
     def _lane_section(
         self, writer: SourceWriter, rid: int, section_index: int, section: LaneSectionSpec

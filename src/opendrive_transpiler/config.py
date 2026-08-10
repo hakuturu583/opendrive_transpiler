@@ -87,8 +87,9 @@ class TranspileOptions:
 
     emit_geo_reference: bool = True
 
-    junctions: bool = False
-    """Phase 2. Off in this release; branch points end a road chain instead."""
+    junctions: bool = True
+    """Emit `<junction>` elements at branch points, with the branch lanelets as
+    connecting roads. Off means branches simply end their road, unconnected."""
 
     signals: bool = False
     """Phase 2. Off in this release; regulatory elements are reported and skipped."""

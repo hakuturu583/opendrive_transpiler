@@ -4,17 +4,20 @@ Two orthogonal groupings, applied in order:
 
 * **Lateral** -- lanelets that share boundaries side by side form a *lane group*,
   ordered left to right. One group is one cross-section.
-* **Longitudinal** -- groups that follow one another one-for-one form a *road
+* **Longitudinal** -- groups that follow one another unambiguously form a *road
   chain*. Each maximal chain becomes one `<road>`; each group inside it becomes
-  one `<laneSection>` at the accumulated `s`.
+  one `<laneSection>` at the accumulated `s`. The lane *count* may change from
+  one section to the next -- that is exactly what a widening or a lane drop is,
+  and OpenDRIVE expresses it by lane sections of differing width linked lane by
+  lane.
 
 That mapping is not a convenience, it is what the OpenDRIVE constructs mean: a
 multi-`laneSection` road *is* a run of consecutive cross-sections with the same
 lane count.
 
-A chain stops wherever the one-for-one correspondence does: at a branch, at a
-merge, or at a change in lane count. In this release those points end a road and
-are reported; joining them through junctions is the next phase.
+A chain stops where the correspondence becomes ambiguous: at a branch, at a
+merge, or where lateral order would have to cross. Those points end a road, and
+`mapping/junctions.py` joins the resulting roads through a `<junction>`.
 """
 
 from __future__ import annotations
@@ -128,12 +131,17 @@ def _next_group(relations: Relations, network: Network, group_index: int) -> int
     """
     group = network.groups[group_index]
 
+    # A member with no successor is a lane that simply ends -- a lane drop, which
+    # is a lane-section change, not a branch. A member with several is a genuine
+    # branch and belongs to a junction.
     successors: list[int] = []
     for member in group.members:
         following = relations.successor_of(member)
-        if len(following) != 1:
+        if len(following) > 1:
             return None
-        successors.append(following[0])
+        successors.extend(following)
+    if not successors:
+        return None
 
     candidate_indices = {network.group_of.get(s) for s in successors}
     if len(candidate_indices) != 1:
@@ -143,14 +151,23 @@ def _next_group(relations: Relations, network: Network, group_index: int) -> int
         return None
 
     target = network.groups[candidate]
-    # Same width, same lateral order, and nothing else feeding into it.
-    if target.members != successors:
+
+    # Lateral order must survive: lanes may appear or disappear, but they may
+    # not cross over one another, or the lane links would be nonsense.
+    carried = set(successors)
+    if successors != [member for member in target.members if member in carried]:
         return None
-    return (
-        candidate
-        if all(len(relations.predecessor_of(member)) == 1 for member in target.members)
-        else None
-    )
+
+    # Nothing outside this group may feed the target, or the join is a merge and
+    # belongs in a junction rather than inside one road.
+    for member in target.members:
+        preceding = relations.predecessor_of(member)
+        if len(preceding) > 1:
+            return None
+        if preceding and network.group_of.get(preceding[0]) != group_index:
+            return None
+
+    return candidate
 
 
 def _build_chains(relations: Relations, network: Network) -> None:

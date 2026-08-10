@@ -105,6 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="fit one cubic per width/elevation profile where it fits within tolerance",
     )
 
+    topology = parser.add_argument_group("topology")
+    topology.add_argument(
+        "--no-junctions",
+        dest="junctions",
+        action="store_false",
+        default=True,
+        help="do not build <junction> elements; leave branching roads unconnected",
+    )
+
     header = parser.add_argument_group("header")
     header.add_argument("--geo-reference", default=None, help="override the PROJ string")
     header.add_argument(
@@ -135,6 +144,7 @@ def options_from(args: argparse.Namespace) -> TranspileOptions:
         chord_tolerance=args.chord_tolerance,
         width_sample_step=args.width_sample_step,
         cubic_profiles=args.cubic_profiles,
+        junctions=args.junctions,
         name=args.name,
         geo_reference=args.geo_reference,
         emit_geo_reference=args.emit_geo_reference,

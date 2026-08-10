@@ -7,10 +7,13 @@ simple_lanelet2's own traffic-rules test corpus appears here.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from opendrive_transpiler.config import TranspileOptions
 from opendrive_transpiler.ir.model import ProjectionIR
+from opendrive_transpiler.mapping.proj import utm_forward
 from opendrive_transpiler.mapping.tables import (
     geo_reference_for,
     lane_type_for,
@@ -222,15 +225,61 @@ def test_utm_geo_reference_names_the_zone_and_hemisphere():
         ProjectionIR("utm", lat=49.0, lon=8.4, alt=0.0, use_offset=True)
     )
     assert "+proj=utm" in proj and "+zone=32" in proj and "+north" in proj
-    # useOffset shifts the origin, which a plain zone string cannot express.
-    assert caveat is not None
+    assert caveat is None
 
 
-def test_utm_without_offset_has_no_caveat():
-    _proj, caveat = geo_reference_for(
+def test_utm_with_offset_carries_the_origin_shift():
+    """lanelet2 subtracts the origin's easting/northing; PROJ must say so."""
+    proj, _ = geo_reference_for(ProjectionIR("utm", lat=49.0, lon=8.4, alt=0.0, use_offset=True))
+    assert "+x_0=" in proj and "+y_0=" in proj
+    x0 = float(proj.split("+x_0=")[1].split()[0])
+    y0 = float(proj.split("+y_0=")[1].split()[0])
+    easting, northing = utm_forward(49.0, 8.4)
+    assert math.isclose(x0, 500000.0 - easting, abs_tol=1e-6)
+    assert math.isclose(y0, -northing, abs_tol=1e-6)
+
+
+def test_utm_without_offset_is_plain_utm():
+    proj, caveat = geo_reference_for(
         ProjectionIR("utm", lat=49.0, lon=8.4, alt=0.0, use_offset=False)
     )
     assert caveat is None
+    assert "+x_0=" not in proj
+
+
+@pytest.mark.parametrize(
+    "lat,lon,easting,northing",
+    [
+        # Reference values cross-checked against pyproj (EPSG:326xx / 327xx).
+        (49.0, 8.4, 456114.596, 5427629.204),
+        (35.68, 139.76, 387789.174, 3949165.002),
+        (-33.9, 151.2, 333568.941, 6247473.337),
+    ],
+)
+def test_utm_forward_matches_a_reference_projection(
+    lat: float, lon: float, easting: float, northing: float
+):
+    got_e, got_n = utm_forward(lat, lon)
+    assert math.isclose(got_e, easting, abs_tol=1e-3)
+    assert math.isclose(got_n, northing, abs_tol=1e-3)
+
+
+def test_mgrs_is_reproduced_as_an_offset_utm_zone():
+    proj, caveat = geo_reference_for(
+        ProjectionIR("mgrs", lat=49.0, lon=8.4, alt=0.0, use_offset=False)
+    )
+    assert "+proj=utm" in proj and "+x_0=" in proj
+    # The offsets land on a 100 km square corner.
+    assert float(proj.split("+y_0=")[1].split()[0]) % 100000.0 == 0.0
+    assert caveat is not None  # the grid letters are not carried
+
+
+def test_geocentric_has_no_planar_equivalent():
+    proj, caveat = geo_reference_for(
+        ProjectionIR("geocentric", lat=0.0, lon=0.0, alt=0.0, use_offset=False)
+    )
+    assert proj is None
+    assert "earth-centred" in caveat
 
 
 def test_southern_hemisphere_utm():
@@ -238,14 +287,6 @@ def test_southern_hemisphere_utm():
         ProjectionIR("utm", lat=-33.9, lon=151.2, alt=0.0, use_offset=False)
     )
     assert "+south" in proj
-
-
-def test_projections_without_a_proj_equivalent_are_reported():
-    proj, caveat = geo_reference_for(
-        ProjectionIR("mgrs", lat=0.0, lon=0.0, alt=0.0, use_offset=False)
-    )
-    assert proj is None
-    assert caveat is not None
 
 
 def test_no_projector_means_no_geo_reference():
