@@ -275,3 +275,29 @@ def test_a_geocentric_map_is_georeferenced_to_its_tangent_plane(tmp_path: Path):
     geometry = root.find("road/planView/geometry")
     assert abs(float(geometry.get("x"))) < 1000.0
     assert abs(float(geometry.get("y"))) < 1000.0
+
+
+def test_street_furniture_reaches_the_xodr(tmp_path: Path):
+    """A guard rail and a crosswalk, as the two shapes of `<object>`."""
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    root = convert(fixtures / "street_furniture.py", tmp_path)
+
+    # The crossing must not have become a road of its own.
+    assert len(root.findall("road")) == 1
+
+    objects = {obj.get("type"): obj for obj in root.findall("road/objects/object")}
+    assert set(objects) == {"barrier", "crosswalk"}
+
+    # A rail is a polyline: its outline stays open and has one corner per point.
+    rail = objects["barrier"]
+    rail_outline = rail.find("outlines/outline")
+    assert rail_outline.get("closed") == "false"
+    assert len(rail_outline.findall("cornerRoad")) == 3
+    assert float(rail.get("height")) > 0.0
+
+    # A crosswalk is a footprint: closed, and sitting along the road it crosses.
+    crossing = objects["crosswalk"]
+    crossing_outline = crossing.find("outlines/outline")
+    assert crossing_outline.get("closed") == "true"
+    assert len(crossing_outline.findall("cornerRoad")) == 4
+    assert 0.0 < float(crossing.get("s")) < float(root.find("road").get("length"))

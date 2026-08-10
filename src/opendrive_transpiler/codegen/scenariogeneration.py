@@ -318,12 +318,24 @@ class ScenarioGenerationEmitter:
 
     def _object(self, writer: SourceWriter, rid: int, index: int, obj) -> None:
         name = f"obj_{rid}_{index}"
-        writer.comment(f"{obj.source} #{obj.lanelet2_id}: {len(obj.corners)} outline corner(s)")
-        writer.line(
-            f"{name} = xodr.Object({literal(obj.s)}, {literal(obj.t)}, "
-            f"Type={literal(obj.type)}, name={literal(obj.name)})"
-        )
-        writer.line(f"{name}_outline = xodr.Outline(closed=True)")
+        note = f"{obj.source} #{obj.lanelet2_id}: {len(obj.corners)} outline corner(s)"
+        if not obj.closed:
+            note += ", open"
+        if obj.height:
+            note += f", height {obj.height:.6g} m assumed"
+        writer.comment(note)
+        args = [
+            literal(obj.s),
+            literal(obj.t),
+            f"Type={literal(obj.type)}",
+            f"name={literal(obj.name)}",
+        ]
+        if obj.height:
+            args.append(f"height={literal(obj.height)}")
+        writer.line(f"{name} = xodr.Object({', '.join(args)})")
+        # A barrier is a polyline; closing it would draw a return leg that is not
+        # in the input.
+        writer.line(f"{name}_outline = xodr.Outline(closed={literal(obj.closed)})")
         for corner in obj.corners:
             writer.line(
                 f"{name}_outline.add_corner(xodr.CornerRoad("

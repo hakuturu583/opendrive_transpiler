@@ -24,6 +24,7 @@ from itertools import pairwise
 from ..config import TranspileOptions
 from ..diagnostics import (
     I_AREA_SKIPPED,
+    I_CROSSWALK_OBJECT,
     I_GEO_REFERENCE,
     I_JUNCTION_SKIPPED,
     I_POLYGON_SKIPPED,
@@ -90,6 +91,14 @@ def build_model(
 
     _apply_geo_reference(ir, model, bag, options)
 
+    # A crosswalk is a marking across a carriageway, not a carriageway of its own,
+    # so it is held back from road building and emitted as an <object> instead.
+    ir, crosswalks = _partition_crosswalks(ir, bag)
+
+    if not ir.lanelets:
+        _report_crosswalks_without_a_road(crosswalks, bag)
+        return model, stats
+
     index = NodeIndex(ir.lanelets, options.point_tolerance)
     rels = relations.infer(ir.lanelets, index)
     network = grouping.build(ir.lanelets, rels)
@@ -108,7 +117,7 @@ def build_model(
 
     _link_roads(network, rels, roads, bag)
 
-    _attach_furniture(builder, roads, ir, options)
+    _attach_furniture(builder, roads, ir, crosswalks, options)
 
     if options.junctions:
         model.junctions = junctions.build(network, rels, roads, ir, bag)
@@ -125,9 +134,66 @@ def build_model(
         stats.signals += len(road.signals)
         stats.objects += len(road.objects)
 
+    # A crosswalk that became an object did convert; counting only road members
+    # would report it as dropped.
+    converted = [o for road in model.roads for o in road.objects if o.source == "Crosswalk"]
+    stats.lanelets_converted += len(converted)
     stats.lanelets_skipped = stats.lanelets_in - stats.lanelets_converted
+    _report_crosswalks(crosswalks, converted, bag)
     _report_furniture(model, ir, stats, bag, options)
     return model, stats
+
+
+def _partition_crosswalks(ir: MapIR, bag: DiagnosticBag) -> tuple[MapIR, list[LaneletIR]]:
+    """Split crosswalk lanelets out of the carriageway.
+
+    Only `crosswalk`. A `walkway` or `shared_walkway` runs *alongside* a road and
+    is a path in its own right, so it stays a road; a crosswalk runs *across* one,
+    and building it as a road produces a carriageway overlapping the street at
+    right angles with no junction between them.
+    """
+    del bag  # reported later, once it is known whether each one found a road
+    crosswalks = [ll for ll in ir.lanelets if ll.subtype.strip().lower() == "crosswalk"]
+    if not crosswalks:
+        return ir, []
+    keep = [ll for ll in ir.lanelets if ll.subtype.strip().lower() != "crosswalk"]
+    return replace(ir, lanelets=keep), crosswalks
+
+
+def _report_crosswalks(crosswalks: list[LaneletIR], converted: list, bag: DiagnosticBag) -> None:
+    """Say that crosswalks changed shape, and name any that found no road."""
+    if not crosswalks:
+        return
+
+    placed = {obj.lanelet2_id for obj in converted}
+    if placed:
+        bag.info(
+            I_CROSSWALK_OBJECT,
+            f'{len(placed)} crosswalk lanelet(s) became <object type="crosswalk"> on the '
+            "road they cross rather than roads of their own, which is how OpenDRIVE "
+            "models a crossing; they are no longer routable paths",
+        )
+
+    orphaned = [ll for ll in crosswalks if ll.lanelet2_id not in placed]
+    if orphaned:
+        names = ", ".join(f"#{ll.lanelet2_id}" for ll in orphaned)
+        bag.info(
+            I_CROSSWALK_OBJECT,
+            f"{len(orphaned)} crosswalk lanelet(s) ({names}) were not converted: an "
+            "object has to sit on a road, and none was near enough or object output "
+            "is disabled",
+        )
+
+
+def _report_crosswalks_without_a_road(crosswalks: list[LaneletIR], bag: DiagnosticBag) -> None:
+    """A map of nothing but crosswalks has no carriageway to put them on."""
+    if crosswalks:
+        bag.info(
+            I_CROSSWALK_OBJECT,
+            f"{len(crosswalks)} crosswalk lanelet(s) were the only lanelets in the map; "
+            "a crosswalk is emitted as an object on the road it crosses, and there is "
+            "no such road here",
+        )
 
 
 def _report_furniture(
@@ -177,14 +243,20 @@ def _report_furniture(
         )
 
 
-def _attach_furniture(builder, roads, ir: MapIR, options: TranspileOptions) -> None:
-    """Give every area and polygon to the road it lies nearest.
+def _attach_furniture(
+    builder,
+    roads,
+    ir: MapIR,
+    crosswalks: list[LaneletIR],
+    options: TranspileOptions,
+) -> None:
+    """Give every area, polygon and crosswalk to the road it lies nearest.
 
     Map furniture belongs to no road in lanelet2, so one has to be chosen. The
     nearest reference line is the only defensible answer, and attaching each to
     exactly one road avoids the same parking bay appearing three times.
     """
-    if not options.objects or not (ir.areas or ir.polygons):
+    if not options.objects or not (ir.areas or ir.polygons or crosswalks):
         return
 
     live = [road for road in roads if road is not None and road.road_id in builder._references]
@@ -208,6 +280,15 @@ def _attach_furniture(builder, roads, ir: MapIR, options: TranspileOptions) -> N
         road = nearest(points)
         road.objects.extend(
             furniture.objects_for(road, builder._references[road.road_id], [area], [], options)
+        )
+
+    for crosswalk in crosswalks:
+        ring = furniture.crosswalk_ring(crosswalk)
+        if len(ring) < 3:
+            continue
+        road = nearest(ring)
+        road.objects.extend(
+            furniture.crosswalks_for(builder._references[road.road_id], [crosswalk], options)
         )
 
     for polygon in ir.polygons:
@@ -425,9 +506,9 @@ class _RoadBuilder:
                 self._build_section(group, group_refs[group_index], s, road_id)
             )
 
-        road.signals = furniture.signals_for(
-            road, reference, [lanelets[i] for i in chain.lanelet_indices], self.options
-        )
+        members = [lanelets[i] for i in chain.lanelet_indices]
+        road.signals = furniture.signals_for(road, reference, members, self.options)
+        road.objects.extend(furniture.barriers_for(road, reference, members, self.options))
         road.lane_offsets = self._lane_offsets(chain.groups[0], reference)
         self._references[road.road_id] = reference
         self._link_lane_sections(road, chain)

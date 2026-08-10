@@ -132,6 +132,58 @@ def signals_for(
     return out
 
 
+def barriers_for(
+    road: RoadSpec,
+    reference: list[Vec3],
+    lanelets: list[LaneletIR],
+    options: TranspileOptions,
+) -> list[ObjectSpec]:
+    """Guard rails, fences and walls along this road's own boundaries.
+
+    A barrier boundary is a `<roadMark type="none">` -- correctly, since it is not
+    a painted line -- so without this it would reach the output as nothing at all.
+    The outline follows the boundary and stays *open*: a rail is a polyline, not a
+    ring, and closing it would draw a return leg that does not exist.
+
+    Unlike areas and polygons there is no road to search for: the boundary belongs
+    to a lanelet of this road.
+    """
+    if not options.objects:
+        return []
+
+    out: list[ObjectSpec] = []
+    # Consecutive lanelets of one road share a boundary, so without this the same
+    # rail would be emitted once per lanelet it runs alongside.
+    seen: set[int] = set()
+
+    for lanelet in lanelets:
+        for bound in (lanelet.left, lanelet.right):
+            object_type = tables.barrier_for(bound.attributes)
+            if object_type is None or bound.key in seen or len(bound) < 2:
+                continue
+            seen.add(bound.key)
+
+            s, t, corners = _outline(reference, [list(bound.coords)])
+            if not corners:
+                continue
+            out.append(
+                ObjectSpec(
+                    s=s,
+                    t=t,
+                    type=object_type,
+                    name=f"{bound.attributes.get('type', 'barrier')}_{bound.lanelet2_id}",
+                    corners=corners,
+                    lanelet2_id=bound.lanelet2_id,
+                    source="barrier",
+                    closed=False,
+                    height=options.barrier_height,
+                )
+            )
+
+    del road
+    return out
+
+
 def _outline(
     reference: list[Vec3], rings: list[list[tuple[float, float, float]]]
 ) -> tuple[float, float, tuple[OutlineCorner, ...]]:
@@ -168,6 +220,59 @@ def _ring_points(bounds) -> list[tuple[float, float, float]]:
     if len(points) > 1 and points[0] == points[-1]:
         points.pop()
     return points
+
+
+def crosswalk_ring(lanelet: LaneletIR) -> list[tuple[float, float, float]]:
+    """A crosswalk lanelet's footprint, as one closed ring.
+
+    Down the left bound and back up the right, which is the same shape
+    `_ring_points` builds for an `Area` -- a crosswalk just stores its outline as
+    two bounds rather than as a ring of line strings.
+    """
+    points = list(lanelet.left.coords) + list(reversed(lanelet.right.coords))
+    deduped: list[tuple[float, float, float]] = []
+    for point in points:
+        if not deduped or deduped[-1] != point:
+            deduped.append(point)
+    if len(deduped) > 1 and deduped[0] == deduped[-1]:
+        deduped.pop()
+    return deduped
+
+
+def crosswalks_for(
+    reference: list[Vec3],
+    lanelets: list[LaneletIR],
+    options: TranspileOptions,
+) -> list[ObjectSpec]:
+    """Crosswalk lanelets as `<object type="crosswalk">` on the road they cross.
+
+    A crosswalk is a marking across a carriageway, not a carriageway of its own,
+    which is what OpenDRIVE's object type says and what stops it from becoming a
+    road overlapping the street at right angles.
+    """
+    if not options.objects:
+        return []
+
+    out: list[ObjectSpec] = []
+    for lanelet in lanelets:
+        ring = crosswalk_ring(lanelet)
+        if len(ring) < 3:
+            continue
+        s, t, corners = _outline(reference, [ring])
+        if not corners:
+            continue
+        out.append(
+            ObjectSpec(
+                s=s,
+                t=t,
+                type="crosswalk",
+                name=f"crosswalk_{lanelet.lanelet2_id}",
+                corners=corners,
+                lanelet2_id=lanelet.lanelet2_id,
+                source="Crosswalk",
+            )
+        )
+    return out
 
 
 def objects_for(

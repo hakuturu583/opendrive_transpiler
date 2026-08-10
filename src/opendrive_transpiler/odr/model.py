@@ -173,6 +173,11 @@ class ObjectSpec:
     corners: tuple[OutlineCorner, ...] = ()
     lanelet2_id: int = 0
     source: str = ""
+    closed: bool = True
+    """Whether the outline is a ring. A barrier is a polyline, so it is not."""
+    height: float = 0.0
+    """Metres, 0 meaning unspecified. lanelet2 carries no heights, so anything
+    non-zero here is a stated convention rather than data from the map."""
 
 
 @dataclass

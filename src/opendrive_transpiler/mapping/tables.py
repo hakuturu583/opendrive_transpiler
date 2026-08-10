@@ -170,6 +170,22 @@ def road_mark_for(
     return RoadMarkSpec(type="none", source=source), False
 
 
+# Boundary types that are a physical barrier rather than a painted line. Their
+# roadMark is `none` -- correctly, since none of them is a marking -- so without
+# this they would reach the output as nothing at all.
+_BARRIER_BY_TYPE: dict[str, str] = {
+    "guard_rail": "barrier",
+    "fence": "railing",
+    "wall": "barrier",
+}
+
+
+def barrier_for(attributes: dict[str, str]) -> str | None:
+    """The OpenDRIVE object type for a barrier boundary, or None if it is not one."""
+    kind = (attributes.get("type", "") or "").strip().lower()
+    return _BARRIER_BY_TYPE.get(kind)
+
+
 def _color_of(attributes: dict[str, str]) -> str:
     color = (attributes.get("color", "") or "").strip().lower()
     return color if color in _KNOWN_COLORS else "standard"

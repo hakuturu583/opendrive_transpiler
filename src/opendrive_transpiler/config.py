@@ -95,13 +95,20 @@ class TranspileOptions:
     """Emit `<signal>` for traffic lights, signs and speed limits."""
 
     objects: bool = True
-    """Emit `<object>` outlines for areas and standalone polygons."""
+    """Emit `<object>` outlines for areas, polygons, barriers and crosswalks."""
 
     # -- roadmark conventions (not carried by lanelet2 attributes) ---------
     thin_mark_width: float = 0.12
     thick_mark_width: float = 0.30
     dash_length: float = 3.0
     dash_space: float = 6.0
+
+    barrier_height: float = 0.75
+    """Height of a `guard_rail` / `fence` / `wall` object, in metres.
+
+    lanelet2 boundaries carry no height, so this is a stated convention like the
+    mark widths above rather than anything read from the map. It reaches the
+    emitted object, so a reader can see what was assumed."""
 
     # -- codegen -----------------------------------------------------------
     revision: tuple[str, str] = field(default=("1", "5"))

@@ -176,6 +176,15 @@ every road and tilt every flat one, so such a map is rotated into east/north/up
 about its own centroid first, and `<geoReference>` names that plane with
 `+proj=topocentric`. The rotation is rigid and is reported (`LL2ODR-I909`).
 
+**A crosswalk is a marking, not a carriageway.** A lanelet tagged
+`subtype=crosswalk` runs *across* a road rather than along one, so building it as
+a road of its own produced a short carriageway overlapping the street at right
+angles with no junction between them. It is emitted as
+`<object type="crosswalk">` on the road it crosses instead, which is what
+OpenDRIVE's object type is for, and reported as `LL2ODR-I910` because it costs
+something real: the crossing is no longer a routable path. A `walkway` or
+`shared_walkway` runs *alongside* a road and is still a road.
+
 **Nothing is dropped silently.** Every feature that is recognised but not
 converted emits a diagnostic naming it, and the same list is repeated in the
 generated file's header. A half-converted HD map that looks complete is worse
@@ -357,8 +366,10 @@ build a map and then run dozens of queries; we want the map.
 - [x] Junction `<priority>` from `RightOfWay`. `scenariogeneration` does not model
       the element, so the generated script carries an eight-line `Junction`
       subclass that appends it
+- [x] Guard rails, fences and walls as `<object type="barrier"/"railing">` with an
+      *open* outline -- a rail is a polyline, not a ring
+- [x] Crosswalks as `<object type="crosswalk">` on the road they cross
 - [ ] Road `<shape>`
-- [ ] Guard rails and crosswalk markings as objects
 
 ---
 
