@@ -914,14 +914,16 @@ class _RoadBuilder:
         median road on that map keeps 99.5% of its lanelets on the bound, and
         there is no reason to take those off exact geometry.
 
-        Not the default, because the swap is not free. OpenDRIVE puts a lane edge
-        at an offset measured *perpendicular* to the reference line, so a bound
-        running at an angle to it -- which is exactly what a lanelet that outruns
-        its bound has -- cannot be followed by one scalar per station. On the
-        roads this switches, the left bound lands a median 1.2 m from the emitted
-        lane edge, and sampling ten times finer moves that by 0.02 m. Extent and
-        boundary placement cannot both be had here; which one matters is the
-        caller's to say.
+        Not the default, because the swap is not free: on the roads it switches,
+        the left bound lands a median 1.1 m from the emitted lane edge.
+
+        That is a coverage problem and not a limit of the lane model. A lane edge
+        sits at `C + t * n`, and wherever the boundary lies under that normal the
+        placement is exact -- what a lanelet which outruns its bound has instead is
+        stretches with no left bound to measure at all. Extent and boundary
+        placement cannot both be had *while those stretches exist*; splitting a
+        laneSection at the boundary's own start and end is what removes them, and
+        is not done yet.
         """
         if self.options.reference_line == "centerline":
             return "centerline"

@@ -56,17 +56,22 @@ class TranspileOptions:
     bound leaves 330 m of lanelet unrepresented, a third of one lanelet in the
     worst case, and "auto" recovers 187 m of that.
 
-    It is not the default because the recovery is not free, and not in a way any
-    tolerance can fix. OpenDRIVE places a lane edge at an offset measured
-    *perpendicular* to the reference line, so a bound running at an angle to it
-    cannot be followed by one scalar per station however finely it is sampled.
-    On the roads "auto" switches, the lanelet's own left bound then lands a
-    median 1.2 m from where the file puts the lane edge -- against 0.000 m for a
-    road that keeps its bound. Sampling ten times finer moves that by 0.02 m, so
-    it is the lane model rather than the fit.
+    It is not the default because the recovery is not free: on the roads it
+    switches, the lanelet's own left bound lands a median 1.1 m from where the
+    file puts the lane edge, against 0.000 m for a road that keeps its bound.
+
+    That cost is a coverage problem rather than a limit of the lane model, which
+    an earlier version of this note had backwards. A lane edge sits at `C + t * n`,
+    perpendicular to the reference line, and wherever the boundary lies under that
+    normal the placement is *exact*. What "auto" runs into is that a lanelet which
+    outruns its bound has stretches with no left bound at all -- 30% of stations on
+    that map -- and there is nothing to measure. So it trades a missing stretch of
+    road for a lane edge placed by guesswork over that stretch.
 
     Choose by what the output is for: "auto" for routing and coverage, the
-    default for anything measuring against the source geometry.
+    default for anything measuring against the source geometry. Splitting a
+    laneSection where a boundary starts and ends is what would shrink the
+    residual, and is not implemented yet.
     """
 
     fit: str = "line"

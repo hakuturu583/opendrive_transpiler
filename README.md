@@ -456,16 +456,25 @@ case, where lanelet2 makes it 75.4 m and the lane covers 24.4 m.
 | roads moved off their own bound | 0 | **20** / 109 | 108 / 109 |
 | lanes whose id implies the wrong direction | 1 | **1** | 190 |
 
-It is **not the default**, and not because of caution. OpenDRIVE places a lane
-edge at an offset measured *perpendicular* to the reference line, so a bound
-running at an angle to it — which is exactly what a lanelet that outruns its
-bound has — cannot be followed by one scalar per station. On the roads `auto`
-switches, the lanelet's own left bound then lands a median **1.2 m** from the
-emitted lane edge, against 0.000 m for a road that keeps its bound. Sampling ten
-times finer moves that by 0.02 m, so it is the lane model rather than the fit:
-extent and boundary placement cannot both be had, and which one matters depends
-on what the output is for. Routing and coverage want `auto`; anything measuring
-against the source geometry wants the default.
+It is **not the default**. On the roads `auto` switches, the lanelet's own left
+bound lands a median **1.1 m** from the emitted lane edge, against 0.000 m for a
+road that keeps its bound.
+
+That cost is not the lane model's fault, and an earlier version of this section
+said it was. OpenDRIVE places a lane edge at `C + t * n`, an offset perpendicular
+to the reference line, and *wherever the boundary lies under that normal the
+placement is exact* — measured over the stations where the boundary is there,
+the reconstruction is out by **0**. What `auto` runs into is that a lanelet which
+outruns its bound has stretches with **no left bound at all**: 30% of stations on
+this map have nothing under the normal to measure, and those are a median 0.5 m
+out. `auto` therefore turns a *missing stretch of road* into a *lane edge placed
+by guesswork over that stretch*, and neither is free.
+
+Which to pick still depends on what the output is for — routing and coverage want
+`auto`, anything measuring against the source geometry wants the default — but the
+residual is a coverage problem, so splitting a `laneSection` where a boundary
+starts and ends is the thing that would actually shrink it. That is how OpenDRIVE
+is authored in practice, and it is not done here yet.
 
 Either way the run says what it did — `W503` gives the shortfall in metres and
 the fraction covered, `W510` names each road moved off its bound.
