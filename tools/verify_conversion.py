@@ -479,7 +479,7 @@ def check_geometry(osm: Osm, xodr: Xodr, xy, lane_of, tolerance: float, show: in
             [xy[r] for r in right_refs if r in xy],
         )
 
-    inner_rows, outer_rows, windowed, swapped, uneven = [], [], [], [], []
+    inner_rows, inner_covered, outer_rows, windowed, swapped, uneven = [], [], [], [], [], []
     for lanelet, (road, index, side, position) in sorted(lane_of.items()):
         if lanelet not in truth:
             continue
@@ -490,6 +490,14 @@ def check_geometry(osm: Osm, xodr: Xodr, xy, lane_of, tolerance: float, show: in
             continue
 
         inner_rows.append((hausdorff(inner, left_truth), lanelet, road.id, side))
+        # One-sided as well: every real point of the left bound must lie on the
+        # emitted edge. Under `--reference-line=auto` a lane deliberately spans
+        # more `s` than the bound it came from, and the two-sided figure counts
+        # that extension as error -- which says the conversion got worse when it
+        # covered more.
+        inner_covered.append(
+            (max(point_to_polyline(p, inner) for p in left_truth), lanelet, road.id, side)
+        )
         outer_rows.append((hausdorff(outer, right_truth), lanelet, road.id, side))
 
         # Restricted to the part of the right bound inside this lane's own stretch
@@ -515,7 +523,19 @@ def check_geometry(osm: Osm, xodr: Xodr, xy, lane_of, tolerance: float, show: in
         if flipped < direct - 0.05:
             swapped.append((direct, flipped, lanelet, road.id))
 
-    report("left bound (the innermost lane's is the reference line)", inner_rows, tolerance, show)
+    report(
+        "left bound, points that exist in the .osm",
+        inner_covered,
+        tolerance,
+        show,
+    )
+    report(
+        "left bound, two-sided",
+        inner_rows,
+        tolerance,
+        show,
+        "  -- also counts a lane that spans more s than the bound, as --reference-line=auto does",
+    )
     report(
         "right bound (reference + fitted width), points inside the lane's own stretch",
         windowed,
