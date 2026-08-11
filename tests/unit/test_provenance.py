@@ -169,6 +169,62 @@ def test_a_cross_section_stacked_out_of_order_is_reported():
 
 
 # --------------------------------------------------------------------------
+# Merges, and links that would be read against the wrong road
+# --------------------------------------------------------------------------
+
+
+def test_a_merge_states_only_the_join_its_road_level_link_names():
+    """A lane's `<predecessor id>` is resolved in the road the road-level link names.
+
+    Two roads merging into one both used to write their lane links in, while the
+    road-level `<predecessor>` could name only one of them -- so the other's lane
+    ids were resolved in a road they did not come from. That is worse than a gap,
+    because it reads as connectivity.
+    """
+    result = convert((FIXTURES / "merge.py").read_text(encoding="utf-8"))
+    merged = max(result.model.roads, key=lambda road: len(road.lane_sections[0].lanes))
+    assert len(merged.lane_sections[0].lanes) == 2
+    assert merged.predecessor is not None
+
+    stated = [lane for lane in merged.lane_sections[0].lanes if lane.predecessor is not None]
+    assert len(stated) == 1, "only the approach the road-level link names can state a lane"
+
+
+def test_the_unjoined_side_of_a_merge_is_reported():
+    result = convert((FIXTURES / "merge.py").read_text(encoding="utf-8"))
+    assert "LL2ODR-W509" in codes(result)
+
+
+def test_a_plain_continuation_still_links_both_ways():
+    """The guard must not cost the ordinary case: one road into one road."""
+    source = """
+from lanelet2.core import Lanelet, LineString3d, Point3d, createMapFromLanelets, getId
+mid_left = Point3d(getId(), 30, 3, 0)
+mid_right = Point3d(getId(), 30, 0, 0)
+first = Lanelet(
+    getId(),
+    LineString3d(getId(), [Point3d(getId(), 0, 3, 0), mid_left]),
+    LineString3d(getId(), [Point3d(getId(), 0, 0, 0), mid_right]),
+)
+first.attributes["subtype"] = "road"
+second = Lanelet(
+    getId(),
+    LineString3d(getId(), [mid_left, Point3d(getId(), 60, 8, 0)]),
+    LineString3d(getId(), [mid_right, Point3d(getId(), 60, 5, 0)]),
+)
+second.attributes["subtype"] = "road"
+lanelet_map = createMapFromLanelets([first, second])
+"""
+    result = convert(source)
+    assert "LL2ODR-W509" not in codes(result)
+    if len(result.model.roads) == 2:
+        head, tail = result.model.roads
+        assert head.successor is not None and tail.predecessor is not None
+        assert head.lane_sections[-1].lanes[0].successor is not None
+        assert tail.lane_sections[0].lanes[0].predecessor is not None
+
+
+# --------------------------------------------------------------------------
 # Contraflow on the right
 # --------------------------------------------------------------------------
 

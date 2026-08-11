@@ -44,6 +44,7 @@ from ..diagnostics import (
     W_SHORT_ROAD,
     W_STACK_NOT_SHARED,
     W_UNEQUAL_BOUND_ENDS,
+    W_UNJOINED_MERGE,
     W_UNKNOWN_ROADMARK,
     W_UNKNOWN_SUBTYPE,
     DiagnosticBag,
@@ -1019,7 +1020,7 @@ def _link_roads(
     the correspondence is already known exactly, lanelet by lanelet, so it is
     written down rather than re-derived.
     """
-    del bag  # branch points are already reported once, in _report_topology
+    merges: dict[int, list[int]] = {}
 
     group_to_chain: dict[int, int] = {}
     for chain_index, chain in enumerate(network.chains):
@@ -1054,7 +1055,6 @@ def _link_roads(
         target_chain = head_group.get(id(target_group))
         if target_chain is None or target_chain == chain_index:
             continue
-        # Only link when nothing else merges into the target.
         if any(len(rels.predecessor_of(m)) != 1 for m in target_group.members):
             continue
 
@@ -1062,9 +1062,46 @@ def _link_roads(
         target_road = roads[target_chain]
         if source_road is None or target_road is None:
             continue
+
+        # A member having a single predecessor is not the same as the road having
+        # one. They can have *different* single predecessors in different roads,
+        # which is a merge, and a road carries exactly one <predecessor>. Letting
+        # both sources link left the second overwriting the road-level element
+        # while the first one's lane links stayed behind -- and a lane's
+        # <predecessor id> is read relative to the road-level link, so those
+        # became ids in a road the file no longer names. The first source keeps
+        # the join; the rest are reported and left for junction support.
+        if target_road.predecessor is not None:
+            merges.setdefault(target_road.road_id, []).append(source_road.road_id)
+            continue
+
         source_road.successor = LinkSpec("road", target_road.road_id, "start")
         target_road.predecessor = LinkSpec("road", source_road.road_id, "end")
         _link_lanes_across(source_road, target_road, last, rels, ir)
+
+    _report_merges(merges, roads, bag)
+
+
+def _report_merges(
+    merges: dict[int, list[int]], roads: list[RoadSpec | None], bag: DiagnosticBag
+) -> None:
+    """Say which roads merge into one, and were therefore left unjoined.
+
+    Only one of them can be the road-level `<predecessor>`, so the others carry
+    no link at all and every succession through them is missing from the file.
+    Reporting it is the difference between a gap someone can act on and a map
+    that silently ends a carriageway.
+    """
+    by_id = {road.road_id: road for road in roads if road is not None}
+    for target, sources in sorted(merges.items()):
+        kept = by_id[target].predecessor
+        names = ", ".join(f"road {source}" for source in sources)
+        bag.warn(
+            W_UNJOINED_MERGE,
+            f"road {target} is entered by more than one road; it keeps the join from road "
+            f"{kept.element_id if kept else '?'} and {names} is left unjoined, because a road "
+            "carries one <predecessor> and a merge needs a junction to express",
+        )
 
 
 def _link_lanes_across(
