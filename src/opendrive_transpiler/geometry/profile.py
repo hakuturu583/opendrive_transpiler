@@ -56,7 +56,9 @@ def _solve(matrix: list[list[float]], rhs: list[float]) -> list[float] | None:
 
     solution = [0.0] * n
     for row in reversed(range(n)):
-        total = augmented[row][n] - sum(augmented[row][k] * solution[k] for k in range(row + 1, n))
+        total = augmented[row][n] - math.fsum(
+            augmented[row][k] * solution[k] for k in range(row + 1, n)
+        )
         solution[row] = total / augmented[row][row]
     return solution
 
@@ -73,8 +75,8 @@ def fit_cubic(
         return None
 
     powers = [[(s - origin) ** k for k in range(4)] for s in stations_]
-    matrix = [[sum(p[i] * p[j] for p in powers) for j in range(4)] for i in range(4)]
-    rhs = [sum(p[i] * v for p, v in zip(powers, values, strict=False)) for i in range(4)]
+    matrix = [[math.fsum(p[i] * p[j] for p in powers) for j in range(4)] for i in range(4)]
+    rhs = [math.fsum(p[i] * v for p, v in zip(powers, values, strict=False)) for i in range(4)]
     solved = _solve(matrix, rhs)
     if solved is None:
         return None

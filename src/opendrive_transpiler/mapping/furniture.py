@@ -16,6 +16,8 @@ catalogue is used and the choice is recorded on every emitted signal.
 
 from __future__ import annotations
 
+import math
+
 from ..config import TranspileOptions
 from ..geometry.fit import lateral_offset
 from ..geometry.polyline import point_at_station, station_of_point
@@ -53,9 +55,9 @@ def _anchor(regelem: RegElemIR) -> tuple[float, float, float] | None:
             continue
         count = len(points)
         return (
-            sum(p[0] for p in points) / count,
-            sum(p[1] for p in points) / count,
-            sum(p[2] for p in points) / count,
+            math.fsum(p[0] for p in points) / count,
+            math.fsum(p[1] for p in points) / count,
+            math.fsum(p[2] for p in points) / count,
         )
     return None
 
@@ -197,7 +199,7 @@ def _outline(
     if not corners:
         return 0.0, 0.0, ()
     anchor_s = min(corner.s for corner in corners)
-    anchor_t = sum(corner.t for corner in corners) / len(corners)
+    anchor_t = math.fsum(corner.t for corner in corners) / len(corners)
     # Corners are relative to the object's own anchor.
     relative = tuple(
         OutlineCorner(s=c.s - anchor_s, t=c.t - anchor_t, dz=c.dz, height=c.height) for c in corners

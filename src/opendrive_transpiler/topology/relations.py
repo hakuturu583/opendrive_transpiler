@@ -143,7 +143,7 @@ def _distance(a, b) -> float:
 
 
 def _path_length(points) -> float:
-    return sum(_distance(a, b) for a, b in pairwise(points))
+    return math.fsum(_distance(a, b) for a, b in pairwise(points))
 
 
 def _span(points) -> Vec2:
@@ -237,8 +237,8 @@ def _is_right_of(lanelets: list[LaneletIR], directions: list[Vec2], i: int, j: i
     def centre(index: int) -> Vec2:
         points = [*lanelets[index].left.points, *lanelets[index].right.points]
         return (
-            sum(p.x for p in points) / len(points),
-            sum(p.y for p in points) / len(points),
+            math.fsum(p.x for p in points) / len(points),
+            math.fsum(p.y for p in points) / len(points),
         )
 
     own = centre(i)

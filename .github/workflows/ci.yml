@@ -94,7 +94,14 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       # --locked re-resolves and fails if uv.lock would change, which catches a
       # pyproject edit that was committed without relocking.
-      - run: uv lock --locked
+      #
+      # UV_FROZEN means "never touch the lockfile" and uv refuses to combine the
+      # two, so the repo-wide default has to go for the one job whose whole
+      # purpose is to re-resolve. It has to be *unset*, not set to "": uv parses
+      # the empty string as a boolean and rejects it.
+      - run: |
+          unset UV_FROZEN
+          uv lock --locked
 
   goldens:
     name: goldens are up to date
