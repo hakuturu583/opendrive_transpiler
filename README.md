@@ -431,13 +431,44 @@ machine-readable. Exit codes: `0` clean, `1` warnings under `--strict`,
 ```bash
 --target {py,xodr,both}              # generated script (default), OpenDRIVE, or both
 --fit {line,arc,parampoly3}          # exact lines (default), arcs, or C1 cubics
---reference-line {left-bound,centerline}
+--reference-line {left-bound,centerline,auto}
 --cubic-profiles                     # one cubic per width/elevation where it fits
 --no-junctions --no-signals --no-objects
 ```
 
 Junctions, signals and objects are all **on** by default; the `--no-` flags turn
 them off, and the run then says what it left out.
+
+### A lanelet can be longer than the bound the road follows
+
+A lane is only as long as the reference line, and lanelet2 does not require a
+lanelet's two bounds to span the same stretch of it. Where the left bound stops
+short, the road ends with it and the rest of the lanelet is not represented:
+**330 m of the Karlsruhe example map**, and a third of one lanelet in the worst
+case, where lanelet2 makes it 75.4 m and the lane covers 24.4 m.
+
+`--reference-line=auto` follows lanelet2's centerline on exactly those roads:
+
+| | `left-bound` (default) | `auto` | `centerline` |
+|---|---|---|---|
+| lanelet length not represented | 330 m | **143 m** | 93 m |
+| lanes keeping under 80% of their lanelet | 43 | **13** | 15 |
+| roads moved off their own bound | 0 | **20** / 109 | 108 / 109 |
+| lanes whose id implies the wrong direction | 1 | **1** | 190 |
+
+It is **not the default**, and not because of caution. OpenDRIVE places a lane
+edge at an offset measured *perpendicular* to the reference line, so a bound
+running at an angle to it — which is exactly what a lanelet that outruns its
+bound has — cannot be followed by one scalar per station. On the roads `auto`
+switches, the lanelet's own left bound then lands a median **1.2 m** from the
+emitted lane edge, against 0.000 m for a road that keeps its bound. Sampling ten
+times finer moves that by 0.02 m, so it is the lane model rather than the fit:
+extent and boundary placement cannot both be had, and which one matters depends
+on what the output is for. Routing and coverage want `auto`; anything measuring
+against the source geometry wants the default.
+
+Either way the run says what it did — `W503` gives the shortfall in metres and
+the fraction covered, `W510` names each road moved off its bound.
 
 ## Documented assumptions
 

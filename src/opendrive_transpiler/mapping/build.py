@@ -36,6 +36,7 @@ from ..diagnostics import (
     W_BAD_SPEED_LIMIT,
     W_BOUNDS_DISAGREE,
     W_BOUNDS_SWAPPED,
+    W_CENTERLINE_REFERENCE,
     W_CONTRAFLOW_RIGHT,
     W_DEGENERATE_LANELET,
     W_EMPTY_SUBTYPE,
@@ -80,6 +81,76 @@ from ..topology.index import NodeIndex
 from . import furniture, junctions, localise, tables
 
 BoundaryKey = tuple[int, ...]
+
+OVERHANG_METRES = 2.0
+OVERHANG_FRACTION = 0.20
+"""When a bound runs so far past the reference line that the road should not follow it.
+
+Both have to be exceeded. Below a lane width the overhang is slack rather than a
+lost stretch of road, and on a long road a couple of metres at the end is
+immaterial either way. Under `--reference-line=auto` these thresholds switch 20
+of the 109 roads on the Lanelet2 Karlsruhe example, recovering 187 m of the 330 m
+that following the bound drops while leaving the other 89 roads on exact input
+geometry. Loosening them to 10% switches 30 roads for another 29 m, which is a
+poor trade: it is the *lanes* on a switched road that give up exact geometry, and
+there are far more of those than there is length to recover.
+
+An overhang test rather than a length comparison, because on a curve the
+centerline is longer than the inner bound purely because of the radius --
+`curved_road` reads as truncated by 5% when nothing at all is lost. And a length
+gain is required as well as an overhang, because a lanelet whose bounds do not
+overlap along the road at all overhangs badly while its centerline is no longer
+than either bound, so switching would cost exact geometry for nothing.
+"""
+
+
+def _overhang(reference: list[Vec3], bound: list[Vec3]) -> float:
+    """How far `bound` runs past either end of `reference`, along its direction.
+
+    Along-track rather than plain distance, which is what separates a lanelet
+    whose bound stops short from one that is merely curved: on concentric arcs the
+    outer bound's end is offset *sideways* from the inner one, contributing
+    nothing here, while a wedge's is offset forwards.
+    """
+
+    def unit(a: Vec3, b: Vec3) -> tuple[float, float]:
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        span = math.hypot(dx, dy)
+        return (dx / span, dy / span) if span else (0.0, 0.0)
+
+    end, forwards = reference[-1], unit(reference[-2], reference[-1])
+    start, backwards = reference[0], unit(reference[1], reference[0])
+    return max(
+        0.0,
+        max((p[0] - end[0]) * forwards[0] + (p[1] - end[1]) * forwards[1] for p in bound),
+        max((p[0] - start[0]) * backwards[0] + (p[1] - start[1]) * backwards[1] for p in bound),
+    )
+
+
+def _shortfall(lanelet: LaneletIR) -> tuple[float, float] | None:
+    """(bound length, lanelet length) when following the bound would cut it short.
+
+    lanelet2's centerline is what `lanelet.centerline` returns and what a router
+    traverses, so it is the authority on how long a lanelet is. A bound shorter
+    than that is one the road cannot follow to the end of the lanelet.
+
+    `None` when nothing is lost, including the case that catches out a length
+    comparison on its own: on a curve the centerline is longer than the inner
+    bound purely because of the radius, and no stretch of road goes missing. The
+    overhang test is what separates the two.
+    """
+    left, right = dedupe(lanelet.left.coords), dedupe(lanelet.right.coords)
+    if len(left) < 2 or len(right) < 2:
+        return None
+    centre = centerline_coords(left, right)
+    if not centre or len(centre) < 2:
+        return None
+    have, want = total_length(left), total_length(centre)
+    if want <= have * (1.0 + OVERHANG_FRACTION):
+        return None
+    if _overhang(left, right) <= OVERHANG_METRES:
+        return None
+    return have, want
 
 
 class OrientedBounds(NamedTuple):
@@ -431,7 +502,10 @@ def _report_topology(
     # outline is still built from these bounds, so malformed ones would otherwise
     # become a silently malformed `<object>`.
     for lanelet in (*ir.lanelets, *crosswalks):
-        if relations.bounds_misaligned(lanelet):
+        shortfall = _shortfall(lanelet)
+        if shortfall is None and not relations.bounds_misaligned(lanelet):
+            continue
+        if shortfall is None:
             bag.warn(
                 W_UNEQUAL_BOUND_ENDS,
                 f"lanelet #{lanelet.lanelet2_id}: its two bounds cover different "
@@ -439,6 +513,16 @@ def _report_topology(
                 "projected onto this road is clamped to its reference line and will "
                 "be silently truncated",
             )
+            continue
+        have, want = shortfall
+        bag.warn(
+            W_UNEQUAL_BOUND_ENDS,
+            f"lanelet #{lanelet.lanelet2_id}: lanelet2 makes it {want:.6g} m long, but "
+            f"its left bound runs only {have:.6g} m, so the lane covers {have / want:.0%} "
+            f"of it and the remaining {want - have:.6g} m is not represented; "
+            "--reference-line=auto follows the centerline here instead, at the cost of "
+            "placing the bound by a perpendicular offset",
+        )
 
     for lanelet in (*ir.lanelets, *crosswalks):
         if relations.bounds_disagree(lanelet):
@@ -527,9 +611,13 @@ class _RoadBuilder:
         if not chain.groups:
             return None
 
+        # One choice for the whole road: the reference line is a single curve, and
+        # concatenating a bound for one section with a centerline for the next
+        # would put a step in it.
+        mode = self.reference_mode(chain)
         group_refs: list[list[Vec3]] = [
             merge_collinear(
-                self._group_reference(group),
+                self._group_reference(group, mode),
                 heading_tolerance=self.options.heading_tolerance,
                 chord_tolerance=self.options.chord_tolerance,
             )
@@ -538,6 +626,8 @@ class _RoadBuilder:
 
         self._report_pivot(chain, road_id)
         self._report_contraflow(chain, road_id)
+        if mode == "centerline-fallback":
+            self._report_reference_choice(chain, road_id)
 
         concatenated: list[Vec3] = []
         for piece in group_refs:
@@ -593,28 +683,28 @@ class _RoadBuilder:
                 )
             )
             road.lane_sections.append(
-                self._build_section(group, group_refs[group_index], s, road_id)
+                self._build_section(group, group_refs[group_index], s, road_id, mode)
             )
 
         members = [lanelets[i] for i in chain.lanelet_indices]
         road.signals = furniture.signals_for(road, reference, members, self.options)
         road.objects.extend(furniture.barriers_for(road, reference, members, self.options))
-        road.lane_offsets = self._lane_offsets(chain.groups[0], reference)
+        road.lane_offsets = self._lane_offsets(chain.groups[0], reference, mode)
         self._references[road.road_id] = reference
         self._link_lane_sections(road, chain)
         return road
 
-    def _lane_offsets(self, group: grouping.LaneGroup, reference: list[Vec3]):
+    def _lane_offsets(self, group: grouping.LaneGroup, reference: list[Vec3], mode: str):
         """Where lane 0 sits relative to the reference line.
 
         Zero whenever the reference line *is* a boundary, so the default layout
         emits nothing. With a computed centreline no boundary lies exactly on it,
         and this records the difference instead of quietly mislocating the lanes.
         """
-        if self.options.reference_line != "centerline":
+        if not mode.startswith("centerline"):
             return []
         boundaries, _attributes, _owners = self.cross_section(group)
-        center = self._center_index(boundaries, reference, group)
+        center = self._center_index(boundaries, reference, group, mode)
         stations_ = sample_stations(reference, self.options.width_sample_step)
         values = offsets_along(reference, stations_, boundaries[center])
         records = build_profile(stations_, values, tolerance=self.options.width_tolerance)
@@ -806,7 +896,91 @@ class _RoadBuilder:
                 return index
         return 0
 
-    def _group_reference(self, group: grouping.LaneGroup) -> list[Vec3]:
+    def reference_mode(self, chain: grouping.RoadChain) -> str:
+        """Whether this road's planView follows a real bound or a centerline.
+
+        A bound is the better reference: it is real input geometry, so the
+        planView reproduces the source coordinates exactly rather than
+        approximating a computed curve. But a lane is only as long as the
+        reference line, and lanelet2 does not require a lanelet's two bounds to
+        span the same stretch of it. Where the left bound stops short of the
+        lanelet, the road ends with it and the rest of the lanelet is not
+        represented at all -- 330 m of the Lanelet2 Karlsruhe example map, a
+        third of one lanelet in the worst case.
+
+        lanelet2's own centerline is long enough by construction, since it is
+        derived from both bounds. Under `--reference-line=auto` it is used for
+        exactly the roads whose bound would truncate them and nowhere else: the
+        median road on that map keeps 99.5% of its lanelets on the bound, and
+        there is no reason to take those off exact geometry.
+
+        Not the default, because the swap is not free. OpenDRIVE puts a lane edge
+        at an offset measured *perpendicular* to the reference line, so a bound
+        running at an angle to it -- which is exactly what a lanelet that outruns
+        its bound has -- cannot be followed by one scalar per station. On the
+        roads this switches, the left bound lands a median 1.2 m from the emitted
+        lane edge, and sampling ten times finer moves that by 0.02 m. Extent and
+        boundary placement cannot both be had here; which one matters is the
+        caller's to say.
+        """
+        if self.options.reference_line == "centerline":
+            return "centerline"
+        if self.options.reference_line != "auto":
+            return "left-bound"
+        for group in chain.groups:
+            if self.centre_boundary(group) is not None:
+                # Two-way: the divider is forced, so there is no choice to make.
+                continue
+            boundaries, _attributes, _owners = self.cross_section(group)
+            chosen = self._first_extended(boundaries)
+            reference = boundaries[chosen]
+            available = total_length(reference)
+            if available <= 0.0 or len(reference) < 2:
+                continue
+            overhang = max(
+                (
+                    _overhang(reference, bound)
+                    for index, bound in enumerate(boundaries)
+                    if index != chosen and len(bound) >= 2
+                ),
+                default=0.0,
+            )
+            if overhang <= OVERHANG_METRES or overhang <= available * OVERHANG_FRACTION:
+                continue
+
+            # And there has to be something to gain. A lanelet whose bounds do not
+            # overlap along the road at all overhangs badly, but its centerline is
+            # no longer than either of them, so switching would trade exact
+            # geometry for nothing.
+            if len(boundaries) < 2:
+                continue
+            centre = centerline_coords(boundaries[0], boundaries[-1])
+            if centre and total_length(centre) > available * (1.0 + OVERHANG_FRACTION):
+                return "centerline-fallback"
+        return "left-bound"
+
+    def _report_reference_choice(self, chain: grouping.RoadChain, road_id: int) -> None:
+        """Say when a road gave up exact geometry to keep its full length.
+
+        Worth stating because it changes what the planView *is*: no longer a copy
+        of an input boundary but a curve computed from both of them, with the
+        boundary recovered through a fitted `<laneOffset>`. Anyone comparing the
+        emitted coordinates against the source needs to know which roads that
+        applies to.
+        """
+        if self.options.reference_line == "centerline":
+            return  # asked for globally, so not news
+        names = ", ".join(f"#{self.ir.lanelets[i].lanelet2_id}" for i in chain.lanelet_indices)
+        self.bag.warn(
+            W_CENTERLINE_REFERENCE,
+            f"road {road_id} ({names}): its left bound is shorter than the lanelets it "
+            "carries, so following it would end the road early and drop the rest; the "
+            "planView follows lanelet2's centerline instead and lane 0 is placed on the "
+            "left bound by <laneOffset>, which keeps the full length but means the "
+            "planView is a computed curve rather than input coordinates",
+        )
+
+    def _group_reference(self, group: grouping.LaneGroup, mode: str) -> list[Vec3]:
         """The polyline the planView follows for this cross-section."""
         boundaries, _attributes, _owners = self.cross_section(group)
         divider = self.centre_boundary(group)
@@ -814,7 +988,7 @@ class _RoadBuilder:
             # Two-way: follow the boundary between the carriageways, so the two
             # directions land on opposite sides of the reference line.
             return boundaries[divider]
-        if self.options.reference_line == "centerline" and len(boundaries) >= 2:
+        if mode.startswith("centerline") and len(boundaries) >= 2:
             # The centre of the whole cross-section, using lanelet2's own
             # algorithm so a script that reads `lanelet.centerline` and the
             # emitted reference line agree.
@@ -826,13 +1000,27 @@ class _RoadBuilder:
         boundaries: list[list[Vec3]],
         reference: list[Vec3],
         group: grouping.LaneGroup | None = None,
+        mode: str = "left-bound",
     ) -> int:
-        """Which boundary lane 0 sits on: the one nearest the reference line."""
+        """Which boundary lane 0 sits on.
+
+        Asking for `--reference-line=centerline` asks for a cross-section laid out
+        around its middle, so lane 0 goes on whichever boundary is nearest the
+        reference and lanes fall on both sides of it.
+
+        The automatic fallback wants the opposite. It is not there to re-centre
+        anything -- only to stop a short bound truncating its lanelets -- so lane 0
+        stays on the leftmost boundary and `<laneOffset>` carries the distance from
+        the centerline out to it. That is what `<laneOffset>` is for, and it keeps
+        every lane to the right of lane 0 with the `-` id that reads as travelling
+        with `s`. Re-centring these instead would turn 190 of the 362 lanes on the
+        Karlsruhe example map into `+` lanes claiming a direction they do not have.
+        """
         if group is not None:
             forced = self.centre_boundary(group)
             if forced is not None:
                 return forced
-        if self.options.reference_line != "centerline":
+        if mode != "centerline":
             # Lane 0 sits on whichever boundary the reference line follows, which
             # is not boundary 0 when that one is a corner pivot.
             return self._first_extended(boundaries)
@@ -863,9 +1051,10 @@ class _RoadBuilder:
         local_reference: list[Vec3],
         s: float,
         road_id: int,
+        mode: str = "left-bound",
     ) -> LaneSectionSpec:
         boundaries, attributes, owners = self.cross_section(group)
-        center = self._center_index(boundaries, local_reference, group)
+        center = self._center_index(boundaries, local_reference, group, mode)
 
         center_mark = self._road_mark(attributes[center], f"road {road_id} centre")
         section = LaneSectionSpec(s=s, center_road_mark=center_mark)
