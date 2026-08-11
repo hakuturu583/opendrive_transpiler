@@ -193,4 +193,7 @@ def test_a_planar_projector_is_left_alone():
     source = _source(projector="UtmProjector(Origin(35.68, 139.7))")
     result = convert(source)
     assert not [d for d in result.diagnostics if d.code == "LL2ODR-I909"]
-    assert "+proj=utm" in result.model.geo_reference
+    # A shifted zone is written as the tmerc that +proj=utm expands to, because
+    # +proj=utm ignores the shift.
+    assert "+proj=tmerc" in result.model.geo_reference
+    assert "+x_0=" in result.model.geo_reference

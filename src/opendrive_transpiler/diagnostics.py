@@ -58,6 +58,8 @@ E_UNKNOWN_ATTRIBUTE = "LL2ODR-E301"
 E_BAD_ARITY = "LL2ODR-E302"
 E_NOT_INSTANTIABLE = "LL2ODR-E303"
 I_QUERY_IGNORED = "LL2ODR-I304"
+I_LOCAL_IMPORT = "LL2ODR-I305"
+E_LOCAL_IMPORT_CYCLE = "LL2ODR-W306"
 
 # E4xx -- non-static values
 E_NOT_STATIC = "LL2ODR-E401"
@@ -70,6 +72,7 @@ W_DEGENERATE_LANELET = "LL2ODR-W502"
 W_UNEQUAL_BOUND_ENDS = "LL2ODR-W503"
 W_NO_LANELETS = "LL2ODR-W504"
 W_BOUNDS_DISAGREE = "LL2ODR-W505"
+W_PIVOT_REFERENCE = "LL2ODR-W506"
 
 # W6xx -- control flow
 W_UNKNOWN_CONDITION = "LL2ODR-W601"
@@ -199,6 +202,19 @@ class DiagnosticBag:
 
     def set_source(self, source: str) -> None:
         self._source_lines = source.splitlines()
+
+    @property
+    def source_lines(self) -> list[str]:
+        """The lines diagnostics quote from, so a caller can restore them.
+
+        Reading a second file retargets them; whoever did that has to put the
+        original back or later carets point into the wrong source.
+        """
+        return self._source_lines
+
+    @source_lines.setter
+    def source_lines(self, lines: list[str]) -> None:
+        self._source_lines = list(lines)
 
     @property
     def items(self) -> list[Diagnostic]:

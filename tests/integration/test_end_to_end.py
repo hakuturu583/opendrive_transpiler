@@ -157,7 +157,10 @@ def test_the_projector_origin_reaches_the_header(tmp_path: Path):
     root = convert(fixtures / "with_projector.py", tmp_path)
     geo = root.find("header/geoReference")
     assert geo is not None
-    assert "+zone=32" in geo.text
+    # Zone 32's central meridian, spelled out: `+proj=utm` would ignore the
+    # origin shift this projector exists to carry.
+    assert "+lon_0=9.0" in geo.text
+    assert "+proj=utm" not in geo.text
 
 
 def test_elevation_is_carried_through(tmp_path: Path):

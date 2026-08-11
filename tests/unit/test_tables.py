@@ -14,6 +14,7 @@ import pytest
 from opendrive_transpiler.config import TranspileOptions
 from opendrive_transpiler.ir.model import ProjectionIR
 from opendrive_transpiler.mapping.proj import (
+    central_meridian,
     ecef_to_enu,
     ecef_to_geodetic,
     enu_basis,
@@ -245,8 +246,31 @@ def test_utm_geo_reference_names_the_zone_and_hemisphere():
     proj, caveat = geo_reference_for(
         ProjectionIR("utm", lat=49.0, lon=8.4, alt=0.0, use_offset=True)
     )
-    assert "+proj=utm" in proj and "+zone=32" in proj and "+north" in proj
+    # Written as the tmerc that +proj=utm expands to -- see
+    # test_a_shifted_zone_is_never_written_as_proj_utm for why it has to be.
+    assert "+proj=tmerc" in proj
+    assert f"+lon_0={central_meridian(32)!r}" in proj
     assert caveat is None
+
+
+def test_a_shifted_zone_is_never_written_as_proj_utm():
+    """`+proj=utm` hardcodes its false easting and ignores any override.
+
+    A string combining the two parses, reads correctly, and silently places the
+    map on the equator -- `(0, 0)` in `+proj=utm +zone=32 +x_0=43885
+    +y_0=-5427629` comes back as 0.000000N 4.511256E rather than the origin it
+    names. Every shifted frame must therefore spell out the tmerc expansion.
+    """
+    shifted = [
+        ProjectionIR("utm", lat=49.0, lon=8.4, alt=0.0, use_offset=True),
+        ProjectionIR("utm", lat=-33.9, lon=151.2, alt=0.0, use_offset=True),
+        ProjectionIR("mgrs", lat=49.0, lon=8.4, alt=0.0, use_offset=False),
+        ProjectionIR("mgrs", lat=0.0, lon=0.0, alt=0.0, use_offset=False, mgrs_code="54SUE"),
+    ]
+    for projection in shifted:
+        proj, _caveat = geo_reference_for(projection)
+        assert "+x_0=" in proj, "these frames are all shifted"
+        assert "+proj=utm" not in proj, f"+proj=utm would ignore the shift: {proj}"
 
 
 def test_utm_with_offset_carries_the_origin_shift():
@@ -289,7 +313,7 @@ def test_mgrs_is_reproduced_as_an_offset_utm_zone():
     proj, caveat = geo_reference_for(
         ProjectionIR("mgrs", lat=49.0, lon=8.4, alt=0.0, use_offset=False)
     )
-    assert "+proj=utm" in proj and "+x_0=" in proj
+    assert "+proj=tmerc" in proj and "+x_0=" in proj
     # The offsets land on a 100 km square corner.
     assert float(proj.split("+y_0=")[1].split()[0]) % 100000.0 == 0.0
     assert caveat is not None  # the grid letters are not carried

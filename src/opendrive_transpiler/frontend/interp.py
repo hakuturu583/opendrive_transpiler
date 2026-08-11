@@ -29,12 +29,14 @@ import ast
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..config import TranspileOptions
 from ..diagnostics import (
     E_BAD_ARITY,
     E_ITERATION_LIMIT,
+    E_LOCAL_IMPORT_CYCLE,
     E_NAME_UNDEFINED,
     E_RECURSION_LIMIT,
     E_STATEMENT_BUDGET,
@@ -44,6 +46,7 @@ from ..diagnostics import (
     E_UNSUPPORTED_EXPR,
     E_UNSUPPORTED_STMT,
     E_UNSUPPORTED_TARGET,
+    I_LOCAL_IMPORT,
     W_NON_STRING_ATTRIBUTE,
     W_UNKNOWN_CONDITION,
     W_UNKNOWN_ITERABLE,
@@ -210,6 +213,21 @@ class PyInstance:
 class BoundMethod:
     instance: Any
     function: Any
+
+
+@dataclass
+class LocalModule:
+    """A module from the input's own directory, interpreted rather than imported.
+
+    Map-building scripts routinely factor their node and lanelet factories into a
+    `helpers.py` alongside. Resolving those the same symbolic way as the script
+    itself keeps the guarantee intact -- nothing is executed, the helper is parsed
+    and interpreted exactly like the input.
+    """
+
+    name: str
+    path: str
+    namespace: dict[str, Any]
 
 
 @dataclass
@@ -394,7 +412,7 @@ _SHADOW_ATTRS: dict[type, frozenset[str]] = {
         }
     ),
     ShadowLayer: frozenset({"exists", "get", "search", "nearest", "uniqueId", "findUsages"}),
-    ProjectionInfo: frozenset({"forward", "reverse", "origin"}),
+    ProjectionInfo: frozenset({"forward", "reverse", "origin", "setMGRSCode"}),
 }
 
 # Regulatory-element accessors, spelled as lanelet2 spells them, mapped to the
@@ -434,11 +452,36 @@ class Interpreter:
         self._yields: list[list[Any]] = []
         self._handling: list[Any] = []
         self._exceptions = exception_types()
+        self._modules: dict[str, LocalModule] = {}
+        self._loading: list[str] = []
 
     # ------------------------------------------------------------------
     # Entry point
     # ------------------------------------------------------------------
+    def define_module_dunders(self, module: ast.Module) -> None:
+        """Seed the globals CPython would have seeded before the first statement.
+
+        Scripts reach for these to locate their own output file or to guard the
+        build, neither of which the conversion cares about -- but an undefined
+        name is an error, so omitting them turned ordinary I/O boilerplate into a
+        failed run.
+
+        `__name__` is `"__main__"` deliberately: a script that guards its build
+        behind that check should have the build run.
+        """
+        docstring = ast.get_docstring(module, clean=False)
+        for name, value in (
+            ("__name__", "__main__"),
+            ("__file__", self.filename),
+            ("__doc__", docstring),
+            ("__package__", ""),
+            ("__spec__", None),
+            ("__loader__", None),
+        ):
+            self.globals.assign(name, value)
+
     def run(self, module: ast.Module) -> Registry:
+        self.define_module_dunders(module)
         try:
             self.exec_block(module.body, self.globals)
             # A script that guards its build behind `if __name__ == "__main__"`
@@ -851,6 +894,123 @@ class Interpreter:
             )
         return False
 
+    def bind_from_local(
+        self, module: LocalModule, node: ast.AST, alias: ast.alias, env: Env
+    ) -> None:
+        """`from helpers import mk` -- or `import *`, which map scripts do use."""
+        if alias.name == "*":
+            for name, value in module.namespace.items():
+                if not name.startswith("_"):
+                    env.assign(name, value)
+            return
+
+        if alias.name in module.namespace:
+            env.assign(alias.asname or alias.name, module.namespace[alias.name])
+            return
+
+        # A submodule of a package, rather than a name the module defined.
+        nested = self.local_module(f"{module.name}.{alias.name}", node)
+        if nested is not None:
+            env.assign(alias.asname or alias.name, nested)
+            return
+
+        self.bag.warn(
+            E_UNKNOWN_ATTRIBUTE,
+            f"{module.name} defines no {alias.name!r}",
+            self.span(node),
+        )
+        env.assign(alias.asname or alias.name, UNKNOWN)
+
+    def local_module(self, dotted: str, node: ast.AST, level: int = 0) -> LocalModule | None:
+        """Find and interpret a module sitting next to the current file.
+
+        Only the importing file's own directory is searched, which is the same
+        place Python puts first on `sys.path` when a script is run directly.
+        Anything further afield is a third-party package, and those stay
+        unresolved by design -- interpreting them would mean interpreting the
+        world.
+
+        `level` is the leading-dot count of a relative import: `.sibling` is
+        level 1 and means this directory, `..cousin` is level 2 and means the one
+        above, and so on.
+        """
+        if not dotted or self.filename in ("<string>", "<unknown>", "<test>"):
+            return None
+
+        root = Path(self.filename).resolve().parent
+        for _ in range(max(level - 1, 0)):
+            root = root.parent
+        relative = dotted.replace(".", "/")
+        for candidate in (root / f"{relative}.py", root / relative / "__init__.py"):
+            if candidate.is_file():
+                break
+        else:
+            return None
+
+        key = str(candidate)
+        if key in self._modules:
+            return self._modules[key]
+        if key in self._loading:
+            # A cycle. Python would hand back a half-built module here; saying so
+            # and moving on is more useful than pretending it resolved.
+            self.bag.warn(
+                E_LOCAL_IMPORT_CYCLE,
+                f"circular import of {dotted!r} while it is still being read; "
+                "names from it resolve to Unknown",
+                self.span(node),
+            )
+            return None
+
+        return self.interpret_module(dotted, candidate, node)
+
+    def interpret_module(self, dotted: str, path: Path, node: ast.AST) -> LocalModule | None:
+        """Parse and symbolically execute a sibling module in its own namespace."""
+        from .loader import parse_source, read_source
+
+        key = str(path)
+        source = read_source(path, self.bag)
+        if not source:
+            return None
+
+        # `parse_source` retargets the bag's source lines for caret rendering, and
+        # the caller's diagnostics still need the original ones afterwards.
+        outer_source, outer_filename = self.bag.source_lines, self.filename
+        module_ast = parse_source(source, key, self.bag)
+        if module_ast is None:
+            self.bag.source_lines = outer_source
+            return None
+
+        namespace = Env()
+        self._loading.append(key)
+        self.filename = key
+        try:
+            saved_globals, self.globals = self.globals, namespace
+            try:
+                self.exec_block(module_ast.body, namespace)
+            finally:
+                self.globals = saved_globals
+        except (_Return, _Abort):
+            pass
+        except _Raise as raised:
+            self.bag.warn(
+                E_UNCAUGHT_RAISE,
+                f"{dotted} raised {getattr(raised.value, 'name', 'an exception')} while "
+                "being read; what it defined up to that point is still used",
+            )
+        finally:
+            self._loading.pop()
+            self.filename = outer_filename
+            self.bag.source_lines = outer_source
+
+        module = LocalModule(name=dotted, path=key, namespace=dict(namespace.vars))
+        self._modules[key] = module
+        self.bag.info(
+            I_LOCAL_IMPORT,
+            f"resolved {dotted!r} from {path.name} beside the input and interpreted it; "
+            "the converted map depends on that file too",
+        )
+        return module
+
     def exec_import(self, node: ast.Import | ast.ImportFrom, env: Env) -> None:
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -862,11 +1022,14 @@ class Interpreter:
                     env.assign(bound, ModuleRef(target))
                 elif dotted in SAFE_MODULES:
                     env.assign(bound, ModuleRef(dotted))
+                elif (local := self.local_module(dotted, node)) is not None:
+                    env.assign(bound, local)
                 else:
                     env.assign(bound, UNKNOWN)
             return
 
         module = node.module or ""
+        level = getattr(node, "level", 0) or 0
         for alias in node.names:
             bound = alias.asname or alias.name
             dotted = f"{module}.{alias.name}" if module else alias.name
@@ -880,6 +1043,11 @@ class Interpreter:
                 env.assign(bound, SAFE_MODULES[module][alias.name])
             elif any(dotted.startswith(q) for q in QUERY_MODULES):
                 env.assign(bound, OpaqueCallable(dotted))
+            elif (local := self.local_module(module, node, level)) is not None:
+                self.bind_from_local(local, node, alias, env)
+            elif (nested := self.local_module(dotted, node, level)) is not None:
+                # `from package import submodule`, where the name is a module.
+                env.assign(bound, nested)
             else:
                 env.assign(bound, UNKNOWN)
 
@@ -1041,10 +1209,6 @@ class Interpreter:
                 return SAFE_BUILTINS[node.id]
             if node.id in self._exceptions:
                 return self._exceptions[node.id]
-            if node.id == "__name__":
-                # Scripts commonly guard the build with `if __name__ == "__main__"`.
-                # Reporting "__main__" runs that block, which is what we want.
-                return "__main__"
             self.bag.error(E_NAME_UNDEFINED, f"undefined name {node.id!r}", self.span(node))
             return UNKNOWN
 
@@ -1474,6 +1638,19 @@ class Interpreter:
             )
             return UNKNOWN
 
+        if isinstance(owner, LocalModule):
+            if name in owner.namespace:
+                return owner.namespace[name]
+            nested = self.local_module(f"{owner.name}.{name}", node)
+            if nested is not None:
+                return nested
+            self.bag.warn(
+                E_UNKNOWN_ATTRIBUTE,
+                f"{owner.name} defines no {name!r}",
+                self.span(node),
+            )
+            return UNKNOWN
+
         if isinstance(owner, Super):
             found, value = owner.lookup(name)
             if not found:
@@ -1718,7 +1895,7 @@ class Interpreter:
             )
             raise _Abort
         try:
-            env = Env(func.closure, self.globals)
+            env = Env(func.closure, func.closure.globals_env)
             self.bind_arguments(func.node.args, func.defaults, func.kw_defaults, args, env, span)
             if func.owner is not None:
                 self.bind_super(func, args, env)
@@ -1957,6 +2134,12 @@ class Interpreter:
         if isinstance(owner, ProjectionInfo):
             if name == "origin":
                 return Origin(GPSPoint(owner.lat, owner.lon, owner.alt))
+            if name == "setMGRSCode" and positional:
+                # Autoware georeferences by naming a 100 km grid square rather
+                # than an origin; the square is what the coordinates are relative
+                # to, so it has to reach <geoReference>.
+                owner.mgrs_code = str(positional[0])
+                return None
             # forward/reverse need a real projection; the map is already in
             # metres, so nothing downstream depends on the answer.
             return UNKNOWN

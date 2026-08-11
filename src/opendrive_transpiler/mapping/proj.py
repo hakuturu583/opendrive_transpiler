@@ -24,6 +24,7 @@ flat one, so such a map is rotated onto a tangent plane first. That is what
 from __future__ import annotations
 
 import math
+import re
 
 from ..geometry.vec import Vec3
 
@@ -183,3 +184,79 @@ def ecef_to_enu(point: Vec3, anchor: Vec3, basis: tuple[Vec3, Vec3, Vec3]) -> Ve
     dy = point[1] - anchor[1]
     dz = point[2] - anchor[2]
     return tuple(row[0] * dx + row[1] * dy + row[2] * dz for row in basis)  # type: ignore[return-value]
+
+
+# --------------------------------------------------------------------------
+# MGRS grid squares
+# --------------------------------------------------------------------------
+# Autoware georeferences by naming a 100 km grid square rather than an origin,
+# so the square's own south-west corner is the frame the coordinates are in.
+
+# I and O are omitted throughout, because they read as 1 and 0.
+_MGRS_COLUMNS = ("ABCDEFGH", "JKLMNPQR", "STUVWXYZ")
+_MGRS_ROWS = "ABCDEFGHJKLMNPQRSTUV"
+_MGRS_BANDS = "CDEFGHJKLMNPQRSTUVWX"
+
+_MGRS_PATTERN = re.compile(
+    r"^\s*(?P<zone>[0-9]{1,2})\s*(?P<band>[C-HJ-NP-X])\s*"
+    r"(?P<column>[A-HJ-NP-Z])(?P<row>[A-HJ-NP-V])\s*$",
+    re.IGNORECASE,
+)
+
+
+def band_latitude(band: str) -> tuple[float, float]:
+    """The latitude range a band letter covers. X is 12 degrees tall, not 8."""
+    index = _MGRS_BANDS.index(band.upper())
+    south = -80.0 + 8.0 * index
+    return south, (south + 12.0 if band.upper() == "X" else south + 8.0)
+
+
+def mgrs_square_corner(code: str) -> tuple[int, float, float, float] | None:
+    """Decode an MGRS grid square to `(zone, easting, northing, latitude)`.
+
+    Easting and northing are the square's south-west corner in that zone's UTM.
+    The row letters repeat every 2000 km, so the band letter is what says which
+    repetition is meant -- without it the answer is ambiguous by whole continents.
+
+    Returns None if the code is not a well-formed 100 km square designator.
+    """
+    match = _MGRS_PATTERN.match(code or "")
+    if match is None:
+        return None
+
+    zone = int(match.group("zone"))
+    if not 1 <= zone <= 60:
+        return None
+    band = match.group("band").upper()
+    column = match.group("column").upper()
+    row = match.group("row").upper()
+
+    columns = _MGRS_COLUMNS[(zone - 1) % 3]
+    if column not in columns:
+        return None
+    easting = (columns.index(column) + 1) * 100000.0
+
+    # Even zones start their row lettering five letters up the alphabet.
+    offset = 0 if zone % 2 else 5
+    northing = ((_MGRS_ROWS.index(row) - offset) % 20) * 100000.0
+
+    # Lift it into the band by whole 2000 km cycles.
+    south, north = band_latitude(band)
+    floor_northing = utm_forward(south, central_meridian(zone), zone)[1]
+    while northing < floor_northing - 100000.0:
+        northing += 2000000.0
+
+    return zone, easting, northing, (south + north) / 2.0
+
+
+def mgrs_code_offsets(code: str) -> tuple[int, float, float, float] | None:
+    """PROJ `+x_0` / `+y_0` for coordinates measured inside a named grid square.
+
+    Returns `(zone, x_0, y_0, latitude)`, or None if the code is malformed.
+    """
+    decoded = mgrs_square_corner(code)
+    if decoded is None:
+        return None
+    zone, easting, northing, latitude = decoded
+    base_northing = _FALSE_NORTHING_SOUTH if latitude < 0.0 else 0.0
+    return zone, _FALSE_EASTING - easting, base_northing - northing, latitude
