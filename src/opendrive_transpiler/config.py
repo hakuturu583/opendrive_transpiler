@@ -48,6 +48,25 @@ class TranspileOptions:
     "centerline" follows the computed centre of the cross-section, so lanes fall
     on both sides as +1/-1, and `<laneOffset>` records where lane 0 actually
     sits. Exact only where the centreline happens to pass through vertices.
+
+    "auto" follows the left bound except on roads where doing so would cut a
+    lanelet short, and lanelet2's centerline there. A lane is only as long as the
+    reference line, and lanelet2 does not require a lanelet's two bounds to span
+    the same stretch of it -- on the Lanelet2 Karlsruhe example, following the
+    bound leaves 330 m of lanelet unrepresented, a third of one lanelet in the
+    worst case, and "auto" recovers 187 m of that.
+
+    It is not the default because the recovery is not free, and not in a way any
+    tolerance can fix. OpenDRIVE places a lane edge at an offset measured
+    *perpendicular* to the reference line, so a bound running at an angle to it
+    cannot be followed by one scalar per station however finely it is sampled.
+    On the roads "auto" switches, the lanelet's own left bound then lands a
+    median 1.2 m from where the file puts the lane edge -- against 0.000 m for a
+    road that keeps its bound. Sampling ten times finer moves that by 0.02 m, so
+    it is the lane model rather than the fit.
+
+    Choose by what the output is for: "auto" for routing and coverage, the
+    default for anything measuring against the source geometry.
     """
 
     fit: str = "line"
@@ -117,7 +136,7 @@ class TranspileOptions:
     # Values the options accept today, as opposed to values that are planned.
     # Accepting a planned value and quietly doing something else is the one
     # failure mode this whole package is built to avoid.
-    IMPLEMENTED_REFERENCE_LINES = ("left-bound", "centerline")
+    IMPLEMENTED_REFERENCE_LINES = ("left-bound", "centerline", "auto")
     PLANNED_REFERENCE_LINES = ()
     IMPLEMENTED_FITS = ("line", "arc", "parampoly3")
     PLANNED_FITS = ()

@@ -110,11 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
     geometry = parser.add_argument_group("geometry")
     geometry.add_argument(
         "--reference-line",
-        choices=["left-bound", "centerline"],
+        choices=["left-bound", "centerline", "auto"],
         default="left-bound",
         help=(
             "what the planView follows: 'left-bound' (the exact outer-left "
-            "boundary, default) or 'centerline' (lanes on both sides)"
+            "boundary, default), 'centerline' (lanes on both sides), or 'auto' "
+            "(the bound, except where it would cut a lanelet short)"
         ),
     )
     geometry.add_argument(
