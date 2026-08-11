@@ -69,9 +69,9 @@ class TranspileOptions:
     road for a lane edge placed by guesswork over that stretch.
 
     Choose by what the output is for: "auto" for routing and coverage, the
-    default for anything measuring against the source geometry. Splitting a
-    laneSection where a boundary starts and ends is what would shrink the
-    residual, and is not implemented yet.
+    default for anything measuring against the source geometry. What shrinks
+    that residual is `split_at_bound_extent`, which cuts the laneSection where
+    the boundary starts and ends instead of guessing across the gap.
     """
 
     fit: str = "line"
@@ -101,6 +101,42 @@ class TranspileOptions:
 
     min_road_length: float = 1e-6
     """Metres. Roads shorter than this are dropped with a diagnostic."""
+
+    split_at_bound_extent: bool = False
+    """Split a `<laneSection>` where a lane boundary starts and where it ends.
+
+    A lane in OpenDRIVE spans its whole laneSection, so a boundary that covers
+    only part of the road has to be given a width over the rest of it too. By
+    default that width comes from the boundary's nearest point, which keeps the
+    profile defined but places the lane edge by guesswork -- the residual behind
+    the accuracy figures in the README, and 30% of stations on the Lanelet2
+    Karlsruhe example.
+
+    With this on, the section is cut at the stations where the boundary actually
+    begins and ends, and over the stretch where it is absent the lane tapers to
+    zero width: an honest statement that the cross-section has no such lane
+    there. It is opt-in because it says something stronger than the input does --
+    lanelet2 gives a lanelet one polygon, not a width per station -- and because
+    it multiplies laneSections, which matters to consumers that pay per section.
+    """
+
+    bound_extent_gap: float = 2.0
+    """Metres. The shortest absent stretch worth cutting a laneSection for.
+
+    Without a floor this is unusable: 369 stretches on the Lanelet2 Karlsruhe
+    example are missing a boundary, and 217 of them are under a metre, so
+    splitting at every one would add that many sub-metre sections for a few
+    centimetres of accuracy each -- and a section shorter than the sampling step
+    has no samples of its own to be accurate with. The threshold applies to both
+    sides of a cut, so a boundary that stops just short of the road's end does
+    not get one either.
+
+    On that map, against 241 sections and a 0.313 m median right-bound error:
+
+        2 m (default)   290 sections   62 lanes zeroed    median 0.289 m
+        1 m             342 sections  122 lanes zeroed
+        0.5 m           400 sections  207 lanes zeroed    median 0.263 m
+    """
 
     # -- output ------------------------------------------------------------
     name: str | None = None
@@ -167,3 +203,6 @@ class TranspileOptions:
         for name in ("point_tolerance", "chord_tolerance", "width_sample_step"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
+
+        if self.bound_extent_gap <= 0:
+            raise ValueError("bound_extent_gap must be positive")

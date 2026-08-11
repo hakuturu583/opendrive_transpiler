@@ -40,6 +40,7 @@ from ..diagnostics import (
     W_CONTRAFLOW_RIGHT,
     W_DEGENERATE_LANELET,
     W_EMPTY_SUBTYPE,
+    W_LANE_ABSENT,
     W_NEGATIVE_WIDTH,
     W_PIVOT_REFERENCE,
     W_SHORT_ROAD,
@@ -59,8 +60,8 @@ from ..geometry.polyline import (
     total_length,
 )
 from ..geometry.profile import (
+    boundary_extent,
     build_profile,
-    lane_widths,
     offsets_along,
     road_elevation,
     road_superelevation,
@@ -682,8 +683,8 @@ class _RoadBuilder:
                     reference, (group_refs[group_index][0][0], group_refs[group_index][0][1])
                 )
             )
-            road.lane_sections.append(
-                self._build_section(group, group_refs[group_index], s, road_id, mode)
+            road.lane_sections.extend(
+                self._build_sections(group, group_refs[group_index], reference, s, road_id, mode)
             )
 
         members = [lanelets[i] for i in chain.lanelet_indices]
@@ -1047,48 +1048,203 @@ class _RoadBuilder:
             cubic=self.options.cubic_profiles,
         )
 
-    def _build_section(
+    def _build_sections(
         self,
         group: grouping.LaneGroup,
         local_reference: list[Vec3],
+        road_reference: list[Vec3],
         s: float,
         road_id: int,
         mode: str = "left-bound",
-    ) -> LaneSectionSpec:
+    ) -> list[LaneSectionSpec]:
+        """The group's cross-section, as one laneSection or as several.
+
+        Several only under `--split-at-bound-extent`, and only where a boundary
+        covers part of the group: the cuts are the stations where it starts and
+        where it ends, so that each section either has that boundary throughout
+        or does not have it at all.
+        """
         boundaries, attributes, owners = self.cross_section(group)
         center = self._center_index(boundaries, local_reference, group, mode)
-
         center_mark = self._road_mark(attributes[center], f"road {road_id} centre")
-        section = LaneSectionSpec(s=s, center_road_mark=center_mark)
 
-        stations_ = sample_stations(local_reference, self.options.width_sample_step)
+        samples = sample_stations(local_reference, self.options.width_sample_step)
+        extents = self._extents(boundaries, center, local_reference, samples)
+        cuts = self._cuts(extents, samples)
 
-        # Lanes above the reference line run outward as +1, +2, …; lanes below it
-        # as -1, -2, …. With a boundary reference (`center == 0`) there is
-        # nothing above, which is the single-sided layout the default produces.
-        for position in range(len(owners)):
-            inner_index, outer_index = position, position + 1
-            if position < center:
-                lane_id = center - position
-                # Going left, the *inner* edge is the one nearer the reference.
-                inner_index, outer_index = position + 1, position
-            else:
-                lane_id = -(position - center + 1)
-
-            lane = self._build_lane(
-                lane_id=lane_id,
-                lanelet=owners[position],
-                inner=boundaries[inner_index],
-                outer=boundaries[outer_index],
-                outer_attrs=attributes[outer_index],
-                local_reference=local_reference,
-                stations_=stations_,
+        sections: list[LaneSectionSpec] = []
+        for start, end in pairwise(cuts):
+            stations_ = [start, *[t for t in samples if start < t < end], end]
+            offsets = self._effective_offsets(
+                boundaries, center, extents, local_reference, stations_
             )
-            (section.left if lane_id > 0 else section.right).append(lane)
+            if start <= 0.0:
+                section_s = s
+            else:
+                cut = point_at_station(local_reference, start)[0]
+                section_s = station_of_point(road_reference, (cut[0], cut[1]))
+            section = LaneSectionSpec(s=section_s, center_road_mark=center_mark)
 
-        section.left.sort(key=lambda lane: lane.lane_id)
-        section.right.sort(key=lambda lane: -lane.lane_id)
-        return section
+            # Lanes above the reference line run outward as +1, +2, …; lanes
+            # below it as -1, -2, …. With a boundary reference (`center == 0`)
+            # there is nothing above, which is the single-sided layout the
+            # default produces.
+            for position in range(len(owners)):
+                inner_index, outer_index = position, position + 1
+                if position < center:
+                    lane_id = center - position
+                    # Going left, the *inner* edge is the one nearer the reference.
+                    inner_index, outer_index = position + 1, position
+                else:
+                    lane_id = -(position - center + 1)
+
+                lane = self._build_lane(
+                    lane_id=lane_id,
+                    lanelet=owners[position],
+                    inner=offsets[inner_index],
+                    outer=offsets[outer_index],
+                    outer_attrs=attributes[outer_index],
+                    stations_=stations_,
+                    origin=start,
+                )
+                (section.left if lane_id > 0 else section.right).append(lane)
+
+            section.left.sort(key=lambda lane: lane.lane_id)
+            section.right.sort(key=lambda lane: -lane.lane_id)
+            sections.append(section)
+            self._report_absent(owners, center, extents, start, end, road_id)
+
+        return sections
+
+    # -- boundary extents ---------------------------------------------------
+    def _extents(
+        self,
+        boundaries: list[list[Vec3]],
+        center: int,
+        local_reference: list[Vec3],
+        samples: list[float],
+    ) -> list[tuple[float, float] | None]:
+        """Where each boundary is actually under the reference line's normal.
+
+        `None` marks a boundary that is not to be split on -- the reference line
+        itself, which is under its own normal everywhere by construction, and
+        every boundary at all when the option is off. Treating those as "present
+        throughout" is what keeps the default byte-identical: the offsets then
+        come straight from `offsets_along`, exactly as before.
+        """
+        if not self.options.split_at_bound_extent or len(samples) < 2:
+            return [None] * len(boundaries)
+        return [
+            None
+            if index == center or len(boundary) < 2
+            else boundary_extent(local_reference, samples, boundary)
+            for index, boundary in enumerate(boundaries)
+        ]
+
+    def _cuts(self, extents: list[tuple[float, float] | None], samples: list[float]) -> list[float]:
+        """Section boundaries: the group's two ends, plus every extent edge worth cutting at.
+
+        An edge is worth cutting at when the stretch it separates is at least
+        `bound_extent_gap` long on *both* sides -- a cut that leaves a sliver
+        buys a few centimetres of width accuracy and costs a whole laneSection,
+        and a section shorter than the sampling step has no samples of its own
+        to be accurate with.
+        """
+        if not samples:
+            return []
+        first, last = samples[0], samples[-1]
+        gap = self.options.bound_extent_gap
+
+        candidates: set[float] = set()
+        for extent in extents:
+            if extent is None:
+                continue
+            candidates.update(extent)
+
+        cuts = [first, last]
+        for candidate in sorted(candidates):
+            if all(abs(candidate - cut) >= gap for cut in cuts):
+                cuts.append(candidate)
+        return sorted(cuts)
+
+    def _effective_offsets(
+        self,
+        boundaries: list[list[Vec3]],
+        center: int,
+        extents: list[tuple[float, float] | None],
+        local_reference: list[Vec3],
+        stations_: list[float],
+    ) -> list[list[float]]:
+        """Lateral offset of every boundary, with an absent one collapsed onto its neighbour.
+
+        Where a boundary does not reach this section, its offset is the *inner*
+        neighbour's plus a linear ramp to the width the lane really has at the
+        end of the section where the boundary does start. So the lane opens from
+        nothing rather than appearing at full width, and -- because each offset
+        is built from the one inside it -- the lanes further out keep their true
+        edges regardless.
+        """
+        start, end = stations_[0], stations_[-1]
+        span = end - start
+        raw = [offsets_along(local_reference, stations_, b) for b in boundaries]
+        effective: list[list[float]] = [[] for _ in boundaries]
+        effective[center] = raw[center]
+
+        for direction in (1, -1):
+            index = center + direction
+            while 0 <= index < len(boundaries):
+                inner = effective[index - direction]
+                extent = extents[index]
+                if extent is None or (extent[0] <= start + 1e-9 and extent[1] >= end - 1e-9):
+                    effective[index] = raw[index]
+                elif extent[0] >= end - 1e-9 or extent[1] <= start + 1e-9:
+                    # The boundary begins after this section or ended before it.
+                    at_end = extent[0] >= end - 1e-9
+                    edge = -1 if at_end else 0
+                    width = raw[index][edge] - inner[edge]
+                    effective[index] = [
+                        inner[i]
+                        + width
+                        * (
+                            0.0
+                            if span <= 0.0
+                            else (s - start) / span
+                            if at_end
+                            else (end - s) / span
+                        )
+                        for i, s in enumerate(stations_)
+                    ]
+                else:
+                    # An extent that ends inside the section: only reachable when
+                    # the cut was suppressed as too short to be worth making, so
+                    # the measured offsets stand.
+                    effective[index] = raw[index]
+                index += direction
+
+        return effective
+
+    def _report_absent(
+        self,
+        owners: list[LaneletIR],
+        center: int,
+        extents: list[tuple[float, float] | None],
+        start: float,
+        end: float,
+        road_id: int,
+    ) -> None:
+        """Name every lane this section emits at zero width, and say what that means."""
+        for position, owner in enumerate(owners):
+            outer = position + 1 if position >= center else position
+            extent = extents[outer]
+            if extent is None or (extent[0] < end - 1e-9 and extent[1] > start + 1e-9):
+                continue
+            self.bag.warn(
+                W_LANE_ABSENT,
+                f"lanelet #{owner.lanelet2_id}: its outer bound covers none of "
+                f"{start:.3g}-{end:.3g} m of road {road_id}, so the lane is emitted "
+                "tapering from zero width there; it carries no traffic over that "
+                "stretch",
+            )
 
     def _road_mark(self, attributes: dict[str, str], where: str):
         mark, known = tables.road_mark_for(attributes, self.options)
@@ -1105,18 +1261,25 @@ class _RoadBuilder:
         *,
         lane_id: int,
         lanelet: LaneletIR,
-        inner: list[Vec3],
-        outer: list[Vec3],
+        inner: list[float],
+        outer: list[float],
         outer_attrs: dict[str, str],
-        local_reference: list[Vec3],
         stations_: list[float],
+        origin: float = 0.0,
     ) -> LaneSpec:
-        widths, minimum = lane_widths(
-            local_reference,
-            inner,
-            outer,
+        """`inner` and `outer` are the two edges' lateral offsets, per station.
+
+        Offsets rather than polylines because a lane's inner edge is not always a
+        boundary: where the lane inside it has collapsed to zero width the inner
+        edge is wherever that collapse left it, and only the caller knows.
+        """
+        values = [abs(o - i) for i, o in zip(inner, outer, strict=False)]
+        minimum = min(values) if values else 0.0
+        widths = build_profile(
+            stations_,
+            values,
             tolerance=self.options.width_tolerance,
-            stations_=stations_,
+            origin=origin,
             cubic=self.options.cubic_profiles,
         )
         if minimum < 0.0:
@@ -1157,12 +1320,21 @@ class _RoadBuilder:
         when its neighbour ended. The lanelet successor relation is the ground
         truth, and it is what carried the sections into one road in the first
         place.
+
+        The one link it does not cover is the seam between two sections cut out
+        of the *same* lanelet, which `--split-at-bound-extent` makes: a lanelet
+        is not its own successor, so those are matched by identity first.
         """
         ids = {lanelet.lanelet2_id: index for index, lanelet in enumerate(self.ir.lanelets)}
 
         for previous, following in pairwise(road.lane_sections):
             by_lanelet = {lane.lanelet2_id: lane for lane in following.lanes}
             for lane in previous.lanes:
+                same = by_lanelet.get(lane.lanelet2_id)
+                if same is not None:
+                    lane.successor = same.lane_id
+                    same.predecessor = lane.lane_id
+                    continue
                 index = ids.get(lane.lanelet2_id)
                 if index is None:
                     continue

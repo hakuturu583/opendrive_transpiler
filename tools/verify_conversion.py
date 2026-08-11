@@ -401,16 +401,24 @@ class Xodr:
                 for c in junction.findall("connection")
             ]
 
-    def lane_of_lanelet(self) -> dict[str, tuple[Road, int, str, int]]:
-        """lanelet2 id -> (road, section index, side, position within side)."""
-        out: dict[str, tuple[Road, int, str, int]] = {}
+    def lane_of_lanelet(self) -> dict[str, list[tuple[Road, int, str, int]]]:
+        """lanelet2 id -> every (road, section index, side, position) it occupies.
+
+        A list rather than one placement, because `--split-at-bound-extent` cuts a
+        laneSection where a boundary starts and ends, and one lanelet then spans
+        several consecutive sections. Keeping only the last would measure the
+        lanelet against whichever stretch happened to come last -- often the
+        tapered one, where the lane is deliberately zero width -- and report the
+        conversion as catastrophically wrong when it is nothing of the kind.
+        """
+        out: dict[str, list[tuple[Road, int, str, int]]] = defaultdict(list)
         for road in self.roads:
             for index, section in enumerate(road.sections):
                 for side in ("left", "right"):
                     for position, lane in enumerate(section[side]):
                         if lane["lanelet2_id"]:
-                            out[lane["lanelet2_id"]] = (road, index, side, position)
-        return out
+                            out[lane["lanelet2_id"]].append((road, index, side, position))
+        return {lanelet: sorted(places, key=lambda p: p[1]) for lanelet, places in out.items()}
 
 
 # --------------------------------------------------------------------------
@@ -480,11 +488,20 @@ def check_geometry(osm: Osm, xodr: Xodr, xy, lane_of, tolerance: float, show: in
         )
 
     inner_rows, inner_covered, outer_rows, windowed, swapped, uneven = [], [], [], [], [], []
-    for lanelet, (road, index, side, position) in sorted(lane_of.items()):
+    for lanelet, places in sorted(lane_of.items()):
         if lanelet not in truth:
             continue
-        section = road.sections[index]
-        inner, outer = road.lane_boundaries(section, side, position)
+        road = places[0][0]
+        # The lane's edges over the whole run of sections it occupies -- one
+        # section for a lanelet the default emits, several where a laneSection
+        # was cut at the station its boundary starts or ends at.
+        inner, outer = [], []
+        for _road, index, side, position in places:
+            piece_inner, piece_outer = road.lane_boundaries(road.sections[index], side, position)
+            inner.extend(piece_inner)
+            outer.extend(piece_outer)
+        side = places[0][2]
+        first, last = road.sections[places[0][1]], road.sections[places[-1][1]]
         left_truth, right_truth = truth[lanelet]
         if len(left_truth) < 2 or len(right_truth) < 2:
             continue
@@ -505,9 +522,7 @@ def check_geometry(osm: Osm, xodr: Xodr, xy, lane_of, tolerance: float, show: in
         # partner, and an emitted lane spans the whole road; counting the leftover
         # as conversion error says more about the input than the conversion.
         window = [
-            p
-            for p in right_truth
-            if section["s"] - 1.0 <= road.station_of(p) <= section["end"] + 1.0
+            p for p in right_truth if first["s"] - 1.0 <= road.station_of(p) <= last["end"] + 1.0
         ]
         if window:
             windowed.append(
@@ -629,16 +644,21 @@ def check_connectivity(osm: Osm, xodr: Xodr, xy, lane_of, show: int) -> None:
                     if lane[tag] is not None:
                         join((road.id, own, lane["id"]), (neighbour.id, far, lane[tag]))
 
-    def address(lanelet: str):
+    def address(lanelet: str, which: int = -1):
+        """Where the lanelet leaves (`-1`) or arrives (`0`), by section.
+
+        A lanelet split across sections is entered at its first and left at its
+        last, so a succession `a -> b` is a link from `a`'s last to `b`'s first.
+        """
         if lanelet not in lane_of:
             return None
-        road, index, side, position = lane_of[lanelet]
+        road, index, side, position = lane_of[lanelet][which]
         return (road.id, index, road.sections[index][side][position]["id"])
 
     verdicts: Counter[str] = Counter()
     missing: list[tuple] = []
     for a, b in successions:
-        first, second = address(a), address(b)
+        first, second = address(a), address(b, 0)
         if first is None or second is None:
             absent = [
                 osm.lanelets[x][2].get("subtype", "?")
@@ -661,7 +681,11 @@ def check_connectivity(osm: Osm, xodr: Xodr, xy, lane_of, show: int) -> None:
     for a, b, first, second in missing[:show]:
         print(f"    {a} -> {b}   {first} -> {second}")
 
-    lanelet_at = {address(lanelet): lanelet for lanelet in lane_of if address(lanelet)}
+    lanelet_at = {
+        address(lanelet, which): lanelet
+        for lanelet, places in lane_of.items()
+        for which in range(len(places))
+    }
     real = {(a, b) for a, b in successions} | {(b, a) for a, b in successions}
     invented = [
         (lanelet_at[first], lanelet_at[second], first, second)
@@ -669,6 +693,9 @@ def check_connectivity(osm: Osm, xodr: Xodr, xy, lane_of, show: int) -> None:
         for second in others
         if first in lanelet_at
         and second in lanelet_at
+        # A lanelet is joined to itself across the sections it was cut into. That
+        # is the cut being sewn back up, not a succession the map does not have.
+        and lanelet_at[first] != lanelet_at[second]
         and (lanelet_at[first], lanelet_at[second]) not in real
     ]
     print(f"\n  links the .xodr states with no succession behind them: {len(invented)}")
