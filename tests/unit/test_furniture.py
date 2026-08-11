@@ -192,3 +192,24 @@ def test_disabling_objects_reports_the_crosswalk_as_unconverted():
     assert objects(result, "Crosswalk") == []
     assert "LL2ODR-I910" in codes(result)
     assert result.stats.lanelets_skipped == 1
+
+
+def test_a_malformed_crosswalk_is_still_checked():
+    """Partitioning crosswalks out of road building must not skip their geometry.
+
+    The outline is built from these same bounds, so a crosswalk whose bounds
+    disagree about where it ends becomes a malformed `<object>` -- which has to be
+    reported, even though the lanelet is no longer a road.
+    """
+    result = convert(
+        STREET
+        + """
+bad = Lanelet(getId(),
+    LineString3d(getId(), [Point3d(getId(), 8.0, 5.0, 0.0),
+                           Point3d(getId(), 8.0, -5.0, 0.0)]),
+    LineString3d(getId(), [Point3d(getId(), 12.0, 5.0, 0.0),
+                           Point3d(getId(), 40.0, -60.0, 0.0)]))
+bad.attributes['subtype'] = 'crosswalk'
+"""
+    )
+    assert "LL2ODR-W503" in codes(result)

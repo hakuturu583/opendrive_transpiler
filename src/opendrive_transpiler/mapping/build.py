@@ -104,7 +104,7 @@ def build_model(
     rels = relations.infer(ir.lanelets, index)
     network = grouping.build(ir.lanelets, rels)
 
-    _report_topology(network, ir, bag, options)
+    _report_topology(network, ir, crosswalks, bag, options)
 
     builder = _RoadBuilder(ir, options, bag, rels)
     chain_of_group: dict[int, int] = {}
@@ -116,7 +116,7 @@ def build_model(
     for chain_index, chain in enumerate(network.chains):
         roads.append(builder.build_road(chain, road_id=chain_index + 1))
 
-    _link_roads(network, rels, roads, bag)
+    _link_roads(network, rels, roads, ir, bag)
 
     _attach_furniture(builder, roads, ir, crosswalks, options)
 
@@ -360,6 +360,7 @@ def _apply_geo_reference(
 def _report_topology(
     network: grouping.Network,
     ir: MapIR,
+    crosswalks: list[LaneletIR],
     bag: DiagnosticBag,
     options: TranspileOptions,
 ) -> None:
@@ -379,7 +380,10 @@ def _report_topology(
             "line follows that boundary regardless of --reference-line",
         )
 
-    for lanelet in ir.lanelets:
+    # Geometry checks cover the crosswalks too. They are not roads, but their
+    # outline is still built from these bounds, so malformed ones would otherwise
+    # become a silently malformed `<object>`.
+    for lanelet in (*ir.lanelets, *crosswalks):
         if relations.bounds_misaligned(lanelet):
             bag.warn(
                 W_UNEQUAL_BOUND_ENDS,
@@ -389,7 +393,7 @@ def _report_topology(
                 "be silently truncated",
             )
 
-    for lanelet in ir.lanelets:
+    for lanelet in (*ir.lanelets, *crosswalks):
         if relations.bounds_disagree(lanelet):
             bag.warn(
                 W_BOUNDS_DISAGREE,
@@ -398,6 +402,8 @@ def _report_topology(
                 "the left bound was taken as authoritative",
             )
 
+    # `one_way` is a lane type, so it stays on the carriageway: a crosswalk that
+    # became an object has no direction of travel to describe.
     for lanelet in ir.lanelets:
         if not lanelet.one_way:
             bag.info(
@@ -793,6 +799,7 @@ def _link_roads(
     network: grouping.Network,
     rels: relations.Relations,
     roads: list[RoadSpec | None],
+    ir: MapIR,
     bag: DiagnosticBag,
 ) -> None:
     """Connect roads whose ends correspond one-for-one.
@@ -801,6 +808,12 @@ def _link_roads(
     like 1 -> 2 lanes is still an unambiguous road link even though it is not a
     single road, so it is worth emitting; a genuine branch is not, and is left
     for junction support.
+
+    Individual *lanes* are linked across the boundary too. The backend can infer
+    those itself, but only by comparing geometry, and it refuses outright when the
+    two roads carry different lane counts -- which a widening precisely is. Here
+    the correspondence is already known exactly, lanelet by lanelet, so it is
+    written down rather than re-derived.
     """
     del bag  # branch points are already reported once, in _report_topology
 
@@ -847,3 +860,27 @@ def _link_roads(
             continue
         source_road.successor = LinkSpec("road", target_road.road_id, "start")
         target_road.predecessor = LinkSpec("road", source_road.road_id, "end")
+        _link_lanes_across(source_road, target_road, last, rels, ir)
+
+
+def _link_lanes_across(
+    source: RoadSpec,
+    target: RoadSpec,
+    last: grouping.LaneGroup,
+    rels: relations.Relations,
+    ir: MapIR,
+) -> None:
+    """Point each lane at the lane it continues into on the next road."""
+    outgoing = {lane.lanelet2_id: lane for lane in source.lane_sections[-1].lanes}
+    incoming = {lane.lanelet2_id: lane for lane in target.lane_sections[0].lanes}
+
+    for member in last.members:
+        following = rels.successor_of(member)
+        if len(following) != 1:
+            continue
+        here = outgoing.get(ir.lanelets[member].lanelet2_id)
+        there = incoming.get(ir.lanelets[following[0]].lanelet2_id)
+        if here is None or there is None:
+            continue
+        here.successor = there.lane_id
+        there.predecessor = here.lane_id

@@ -93,7 +93,7 @@ def build() -> xodr.OpenDrive:
     pv_1 = xodr.PlanView()
     pv_1.add_fixed_geometry(xodr.Line(1.0), 0.0, 1.0, 0.0, s=0.0)
     ...
-    odr.adjust_roads_and_lanes()   # geometry is already fixed; this only derives lane links
+    # No adjust_roads_and_lanes(): geometry is already fixed and every link is resolved
     return odr
 ```
 
@@ -165,6 +165,15 @@ whose reference line follows the shared boundary, so the two directions land on
 opposite sides of it as `+1`/`-1` — which is exactly what an OpenDRIVE left lane
 means. That overrides `--reference-line`, because no other choice puts traffic on
 the correct side.
+
+**Every link is written down, never inferred by the backend.** The generated
+script does not call `adjust_roads_and_lanes()`. That call is
+`adjust_startpoints()` — a no-op here, since the geometry is already fixed — plus
+`create_lane_links()` over every pair of roads, which re-derives lane links from
+geometry and *refuses* when two connected roads carry different lane counts. A
+lane widening is exactly that, so on a real map it fails outright. The lanelet
+topology already states the correspondence exactly, lanelet by lanelet, so it is
+emitted directly. This also drops an O(n²) pass.
 
 **Geocentric maps are the one case where the geometry is moved.** Every other
 projector hands over a planar metre frame, so coordinates pass through untouched

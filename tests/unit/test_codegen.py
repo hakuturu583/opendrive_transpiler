@@ -124,10 +124,19 @@ def test_generated_source_uses_fixed_geometry():
     assert "add_geometry(" not in code.replace("add_fixed_geometry(", "")
 
 
-def test_generated_source_adjusts_only_to_derive_links():
+def test_generated_source_does_not_adjust_anything():
+    """Every link is written down, so nothing is left for the backend to infer.
+
+    `adjust_roads_and_lanes()` would re-derive lane links from geometry, and it
+    refuses when two connected roads carry different lane counts -- which is what a
+    lane widening is. The script must not depend on it.
+    """
     code = generate()
-    assert "odr.adjust_roads_and_lanes()" in code
-    assert "adjust_startpoints" not in code
+    # The comment names the call to explain its absence, so look for the call
+    # itself: a statement, not a mention.
+    calls = [line.strip() for line in code.splitlines() if not line.strip().startswith("#")]
+    assert not [line for line in calls if "adjust_roads_and_lanes" in line]
+    assert not [line for line in calls if "adjust_startpoints" in line]
 
 
 def test_generated_source_records_provenance():

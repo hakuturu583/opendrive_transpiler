@@ -50,6 +50,7 @@ CORPUS_SUBTYPES = [
     "traffic_island",
     "pedestrian_lane",
     "lane",
+    "rail",
 ]
 
 # The full boundary vocabulary from the same file.
@@ -66,6 +67,14 @@ CORPUS_BOUNDARIES = [
     ("virtual", ""),
     ("road_border", ""),
     ("guard_rail", ""),
+    ("pedestrian_marking", ""),
+    ("zebra_marking", ""),
+    ("bike_marking", ""),
+    ("keepout", ""),
+    ("zig-zag", ""),
+    ("symbol", ""),
+    ("rail", ""),
+    ("stop_line", ""),
 ]
 
 
@@ -90,6 +99,7 @@ def test_every_corpus_subtype_is_recognised(subtype: str):
         ("freespace", "restricted"),
         ("traffic_island", "median"),
         ("stairs", "none"),
+        ("rail", "rail"),
     ],
 )
 def test_lane_types(subtype: str, expected: str):
@@ -142,6 +152,11 @@ def test_every_corpus_boundary_is_recognised(kind: str, subtype: str):
         ("road_border", "", "edge"),
         ("virtual", "", "none"),
         ("guard_rail", "", "none"),
+        ("pedestrian_marking", "", "none"),
+        ("zebra_marking", "", "none"),
+        ("keepout", "", "none"),
+        ("zig-zag", "", "none"),
+        ("rail", "", "none"),
     ],
 )
 def test_road_mark_types(kind: str, subtype: str, expected: str):

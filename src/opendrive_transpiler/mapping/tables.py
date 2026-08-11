@@ -40,6 +40,9 @@ LANE_TYPE_BY_SUBTYPE: dict[str, str] = {
     "parking": "parking",
     "freespace": "restricted",
     "traffic_island": "median",
+    # A rail lanelet carries rail vehicles, not cars. OpenDRIVE distinguishes
+    # `rail` from `tram`; lanelet2 does not, so the literal match is the honest one.
+    "rail": "rail",
 }
 
 DEFAULT_LANE_TYPE = "driving"
@@ -108,7 +111,12 @@ _MARK_BY_PAIR: dict[tuple[str, str], tuple[str, str]] = {
     ("line_thick", "solid_dashed"): ("solid_broken", "bold"),
 }
 
-# Boundary types that are physical features rather than painted markings.
+# Boundary types that are not lane dividers. Mapping them to `none` is a real
+# answer rather than a fallback: each is either a physical feature or a surface
+# marking, and OpenDRIVE's roadMark vocabulary describes neither. Where the thing
+# itself can be carried, it is carried elsewhere -- `guard_rail`, `fence` and
+# `wall` also become a barrier `<object>`, and a crossing becomes an
+# `<object type="crosswalk">`.
 _MARK_BY_TYPE: dict[str, str] = {
     "curbstone": "curb",
     "road_border": "edge",
@@ -117,6 +125,16 @@ _MARK_BY_TYPE: dict[str, str] = {
     "fence": "none",
     "wall": "none",
     "stop_line": "none",
+    # Markings painted across or beside the carriageway rather than along a lane
+    # edge: crossing stripes, hatched keep-out boxes, no-parking zig-zags.
+    "pedestrian_marking": "none",
+    "zebra_marking": "none",
+    "bike_marking": "none",
+    "keepout": "none",
+    "zig-zag": "none",
+    "symbol": "none",
+    # A tram rail embedded in the road surface.
+    "rail": "none",
     "": "none",
 }
 

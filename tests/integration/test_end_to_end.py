@@ -36,6 +36,7 @@ CONVERTIBLE = [
     "curved_road",
     "with_projector",
     "branch",
+    "merge",
 ]
 
 
@@ -301,3 +302,42 @@ def test_street_furniture_reaches_the_xodr(tmp_path: Path):
     assert crossing_outline.get("closed") == "true"
     assert len(crossing_outline.findall("cornerRoad")) == 4
     assert 0.0 < float(crossing.get("s")) < float(root.find("road").get("length"))
+
+
+def test_a_merge_links_lanes_across_roads_of_different_widths(tmp_path: Path):
+    """The case the backend's own lane linking refuses outright.
+
+    `create_lane_links` raises `NotSameAmountOfLanesError` when two connected roads
+    carry different lane counts, so these links are written down from the lanelet
+    topology instead. The junction's `<laneLink>` records disambiguate which
+    incoming lane feeds which outgoing one.
+    """
+    fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+    root = convert(fixtures / "merge.py", tmp_path)
+
+    roads = {road.get("id"): road for road in root.findall("road")}
+    assert len(roads) == 3
+
+    # The two approaches are one lane each; what they merge into carries two.
+    widths = {rid: len(r.findall("lanes/laneSection/right/lane")) for rid, r in roads.items()}
+    assert sorted(widths.values()) == [1, 1, 2]
+
+    # Every lane on a one-lane approach names the lane it continues into...
+    approaches = [r for rid, r in roads.items() if widths[rid] == 1]
+    for road in approaches:
+        for lane in road.findall("lanes/laneSection/right/lane"):
+            assert lane.find("link/successor") is not None
+
+    # ...and both lanes of the merged road name where they came from.
+    merged = next(r for rid, r in roads.items() if widths[rid] == 2)
+    for lane in merged.findall("lanes/laneSection/right/lane"):
+        assert lane.find("link/predecessor") is not None
+
+    # The junction is what says which approach feeds which lane, unambiguously.
+    links = {
+        (c.get("incomingRoad"), link.get("from"), link.get("to"))
+        for c in root.findall("junction/connection")
+        for link in c.findall("laneLink")
+    }
+    outgoing = {to for _incoming, _frm, to in links}
+    assert len(outgoing) == 2, "each approach must feed a different outgoing lane"

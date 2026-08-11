@@ -43,8 +43,7 @@ def build() -> xodr.OpenDrive:
     road_1.add_signal(sig_1_0)
     odr.add_road(road_1)
 
-    # Geometry is already fixed to the input coordinates, so this only derives lane links; it will not move anything.
-    odr.adjust_roads_and_lanes()
+    # No adjust_roads_and_lanes() call: geometry is already fixed to the input coordinates, and every road and lane link was resolved from the lanelet topology rather than re-derived from geometry.
     return odr
 
 

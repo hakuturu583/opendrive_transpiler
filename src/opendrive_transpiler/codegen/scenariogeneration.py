@@ -1,14 +1,21 @@
 """Emitting a `scenariogeneration.xodr` script from an `OdrModel`.
 
-Two things about the generated script are deliberate.
+Three things about the generated script are deliberate.
 
 **It uses `add_fixed_geometry`, not `add_geometry`.** We already know every
 coordinate exactly, so there is nothing to solve for. `add_fixed_geometry` stores
-an absolute `(x, y, hdg)` per record and marks the planView adjusted; the
-subsequent `adjust_roads_and_lanes()` then skips geometry patching entirely and
-only derives lane links. That is what keeps the emitted geometry bit-for-bit
-faithful to the input. (The two methods are mutually exclusive -- mixing them
-raises `MixOfGeometryAddition` -- so this choice is all-or-nothing.)
+an absolute `(x, y, hdg)` per record and marks the planView adjusted, which is
+what keeps the emitted geometry bit-for-bit faithful to the input. (The two
+methods are mutually exclusive -- mixing them raises `MixOfGeometryAddition` --
+so this choice is all-or-nothing.)
+
+**It does not call `adjust_roads_and_lanes()`.** That call is
+`adjust_startpoints()` plus `create_lane_links()` over every pair of roads. The
+first is a no-op here because the geometry is already fixed, so the only reason to
+call it was lane linking -- and lane linking is inferred there from geometry, which
+fails on real maps: it refuses outright when two connected roads carry different
+lane counts, which a lane widening precisely is. The links are written down from
+the lanelet topology instead, where the correspondence is known exactly.
 
 **It carries provenance comments.** Each road names the lanelets it came from and
 each lane its subtype and width. The generated file is meant to be read and
@@ -117,10 +124,10 @@ class ScenarioGenerationEmitter:
             writer.blank()
             if model.roads:
                 writer.comment(
-                    "Geometry is already fixed to the input coordinates, so this only "
-                    "derives lane links; it will not move anything."
+                    "No adjust_roads_and_lanes() call: geometry is already fixed to the "
+                    "input coordinates, and every road and lane link was resolved from "
+                    "the lanelet topology rather than re-derived from geometry."
                 )
-                writer.line("odr.adjust_roads_and_lanes()")
             writer.line("return odr")
         writer.blank(2)
         writer.line('if __name__ == "__main__":')
