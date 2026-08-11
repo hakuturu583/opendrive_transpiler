@@ -129,18 +129,43 @@ def build(
         if stem is None or any(road is None for _index, road in branches):
             continue
 
-        # A road can only belong to one junction; a second claim would overwrite
-        # its junction id and silently corrupt the first.
-        involved = {site.stem, *site.branches}
-        if involved & claimed:
-            names = ", ".join(f"#{i}" for i in sorted(involved & claimed))
+        # Only a *connecting* road carries `junction="<id>"`, and only those can
+        # be claimed twice. The road on the single side of a divergence -- and on
+        # the several side of a convergence -- keeps `junction="-1"` and merely
+        # links to the junction, so it can serve one at each end. That is exactly
+        # what a road between two intersections does, and claiming it as well used
+        # to abandon the second branch point: 24 of them on the Karlsruhe example
+        # map, which is where most of its missing connectivity went.
+        connecting = set(site.branches) if site.kind == "diverge" else {site.stem}
+        if connecting & claimed:
+            names = ", ".join(f"#{i}" for i in sorted(connecting & claimed))
             bag.info(
                 I_JUNCTION_SKIPPED,
-                f"road(s) {names} already belong to a junction; the overlapping "
-                "branch point was left unconnected rather than reassigned",
+                f"road(s) {names} are already a connecting road of another junction; the "
+                "overlapping branch point was left unconnected rather than reassigned",
             )
             continue
-        claimed |= involved
+
+        # The links this junction is about to write have to be free. Overwriting
+        # one would silently drop a connection already established, which is the
+        # failure the claim above exists to prevent.
+        if site.kind == "diverge":
+            taken = stem.successor is not None or any(
+                road.predecessor is not None for _index, road in branches
+            )
+        else:
+            taken = stem.predecessor is not None or any(
+                road.successor is not None for _index, road in branches
+            )
+        if taken:
+            bag.info(
+                I_JUNCTION_SKIPPED,
+                f"road #{site.stem} or one of its branches is already linked at the end this "
+                "branch point would use; it was left unconnected rather than relinked",
+            )
+            continue
+
+        claimed |= connecting
 
         junction_id = len(junctions) + 1
         junction = JunctionSpec(junction_id=junction_id, name=f"junction_{junction_id}")

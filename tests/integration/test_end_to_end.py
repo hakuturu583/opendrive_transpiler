@@ -325,36 +325,27 @@ def test_a_merge_links_lanes_across_roads_of_different_widths(tmp_path: Path):
     widths = {rid: len(r.findall("lanes/laneSection/right/lane")) for rid, r in roads.items()}
     assert sorted(widths.values()) == [1, 1, 2]
 
-    # The merged road names one approach as its <predecessor>, because a road
-    # carries exactly one. A lane's <predecessor id> is read against that road,
-    # so only the lane fed by *that* approach can state one: the other lane's id
-    # would be resolved in a road it does not come from.
+    # A road carries exactly one <predecessor>, so road-level links cannot state a
+    # merge at all -- one approach would be left out. The junction carries it, and
+    # the merged road is its connecting road.
     merged = next(r for rid, r in roads.items() if widths[rid] == 2)
-    named = merged.find("link/predecessor")
-    assert named is not None and named.get("elementType") == "road"
-    stated = [
-        lane
-        for lane in merged.findall("lanes/laneSection/right/lane")
-        if lane.find("link/predecessor") is not None
-    ]
-    assert len(stated) == 1, "only the join the road-level link names is expressible"
+    junction = root.find("junction")
+    assert junction is not None
+    assert merged.get("junction") == junction.get("id")
+    assert merged.find("link/predecessor") is None, (
+        "a connecting road takes its incoming ends from the junction, not a road link"
+    )
 
-    # The approach that keeps the join says where it goes; the other is reported
-    # rather than left to look connected.
+    # Both approaches point at the junction rather than at each other.
     approaches = {rid: r for rid, r in roads.items() if widths[rid] == 1}
-    onward = [
-        rid
-        for rid, road in approaches.items()
-        if any(
-            lane.find("link/successor") is not None
-            for lane in road.findall("lanes/laneSection/right/lane")
-        )
-    ]
-    assert onward == [named.get("elementId")]
+    for road in approaches.values():
+        successor = road.find("link/successor")
+        assert successor is not None
+        assert successor.get("elementType") == "junction"
+        assert successor.get("elementId") == junction.get("id")
 
     # The junction is what says which approach feeds which lane, unambiguously,
-    # and it carries *both* correspondences -- which is why dropping the second
-    # road-level lane link loses nothing.
+    # and it carries *both* correspondences.
     links = {
         (c.get("incomingRoad"), link.get("from"), link.get("to"))
         for c in root.findall("junction/connection")

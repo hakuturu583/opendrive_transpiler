@@ -159,13 +159,17 @@ def build_model(
     for chain_index, chain in enumerate(network.chains):
         roads.append(builder.build_road(chain, road_id=chain_index + 1))
 
-    _link_roads(network, rels, roads, ir, bag)
-
-    _attach_furniture(builder, roads, ir, crosswalks, options)
-
+    # Junctions first, then plain road links. A branch point is what a junction
+    # exists to express, so it has to claim its ends before the road-to-road pass
+    # does -- the other order let a plain link block the junction that should have
+    # replaced it, and the merge fixture then came out with no junction at all.
     if options.junctions:
         model.junctions = junctions.build(network, rels, roads, ir, bag)
         stats.junctions = len(model.junctions)
+
+    _link_roads(network, rels, roads, ir, bag)
+
+    _attach_furniture(builder, roads, ir, crosswalks, options)
 
     for road in roads:
         if road is None:
@@ -1061,6 +1065,15 @@ def _link_roads(
         source_road = roads[chain_index]
         target_road = roads[target_chain]
         if source_road is None or target_road is None:
+            continue
+
+        # Junctions run first and are authoritative: where one already links these
+        # ends, it states the correspondence lane by lane and there is nothing
+        # left to add. Silent, because nothing was lost.
+        if source_road.successor is not None or (
+            target_road.predecessor is not None
+            and target_road.predecessor.element_type == "junction"
+        ):
             continue
 
         # A member having a single predecessor is not the same as the road having
