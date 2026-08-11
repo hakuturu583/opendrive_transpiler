@@ -22,10 +22,12 @@ merge, or where lateral order would have to cross. Those points end a road, and
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
+from ..geometry.vec import Vec2, dot2
 from ..ir.model import LaneletIR
-from .relations import Relations
+from .relations import Relations, travel_direction
 
 
 @dataclass
@@ -138,6 +140,48 @@ def _leftmost(relations: Relations, index: int) -> tuple[int, bool]:
         current = preceding
 
 
+def _left_to_right(
+    lanelets: list[LaneletIR], members: list[int], flags: list[bool]
+) -> tuple[list[int], list[bool]]:
+    """Put a cross-section's members in the order everything downstream assumes.
+
+    The walk that collects them follows adjacency, and adjacency has no side: it
+    can arrive from either end, and crossing into opposing traffic flips the sense
+    of left and right on the way. So the order it produces is not reliably left to
+    right, and `cross_section` -- which stacks `m0.left, m0.right, m1.right, ...`
+    -- then puts the shared bound at *both* edges of the cross-section and drops
+    an outer one.
+
+    Ordering is done here, once, from geometry: project each member's centre onto
+    the left-hand normal of the group's own forward direction and sort from left.
+    A member marked reversed contributes its direction negated, so all members
+    agree on which way the group faces before anything is compared.
+    """
+    if len(members) < 2:
+        return members, flags
+
+    def forward_of(member: int, reversed_: bool) -> Vec2:
+        direction = travel_direction(lanelets[member])
+        return (-direction[0], -direction[1]) if reversed_ else direction
+
+    forward = forward_of(members[0], flags[0])
+    if forward == (0.0, 0.0):
+        return members, flags
+    normal: Vec2 = (-forward[1], forward[0])  # points to the group's left
+
+    def offset(member: int) -> float:
+        points = [*lanelets[member].left.points, *lanelets[member].right.points]
+        if not points:
+            return 0.0
+        x = math.fsum(p.x for p in points) / len(points)
+        y = math.fsum(p.y for p in points) / len(points)
+        return dot2((x, y), normal)
+
+    # Descending: the largest offset along the left normal is the leftmost member.
+    order = sorted(range(len(members)), key=lambda i: -offset(members[i]))
+    return [members[i] for i in order], [flags[i] for i in order]
+
+
 def _build_groups(lanelets: list[LaneletIR], relations: Relations, network: Network) -> None:
     assigned: set[int] = set()
 
@@ -165,6 +209,7 @@ def _build_groups(lanelets: list[LaneletIR], relations: Relations, network: Netw
         forward_flip = start_flipped
         members = [member for member, _ in walk]
         flags = [flipped != forward_flip for _, flipped in walk]
+        members, flags = _left_to_right(lanelets, members, flags)
 
         for member in members:
             assigned.add(member)
