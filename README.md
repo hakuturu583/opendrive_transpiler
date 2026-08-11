@@ -494,6 +494,61 @@ uv run --no-default-groups --group test pytest tests -q
 The centerline port is checked against the golden vectors in simple_lanelet2's own
 `crates/ll2-core/src/centerline.rs` test module.
 
+### Checking a conversion against the map it came from
+
+The test suite pins the emitter against itself. It cannot tell you whether an
+`.xodr` matches the `.osm` behind it, and the golden files least of all — they
+are the tool's own output, frozen. `tools/` answers that question instead, on a
+real surveyed map:
+
+```bash
+pip install pyproj                                   # not a project dependency
+python tools/osm_to_script.py map.osm map.py         # the script that builds it
+transpile_lanelet2 map.py --target xodr -o map.xodr
+python tools/verify_conversion.py map.osm map.xodr
+```
+
+`verify_conversion.py` **shares no geometry or projection code with the
+transpiler**. It parses the `.osm` with ElementTree, projects with pyproj using
+the `.xodr`'s own `<geoReference>`, and evaluates the plan view from the OpenDRIVE
+spec. That is the whole point — a checker built on the code under test cancels its
+own bugs out and reports a clean bill of health. It reports three things:
+
+* **geometry** — each lane's two boundaries against the two bounds of the lanelet
+  it says it is, as a two-sided Hausdorff distance
+* **direction** — lanes that fit better with left and right swapped, which is what
+  a lane whose id implies the wrong direction of travel looks like
+* **connectivity** — every lanelet succession in the `.osm` against every
+  lane-to-lane connection the `.xodr` states, **in both directions**; a link the
+  file asserts with no succession behind it is worse than a missing one
+
+On the Lanelet2 Karlsruhe example map (`lanelet2_maps/res/mapping_example.osm`,
+2258 nodes, 371 lanelets) the current output is:
+
+| | |
+|---|---|
+| projection vs pyproj | 48 µm, constant |
+| lanes reproducing their lanelet's left bound to within 0.1 mm | 242 / 362 |
+| lanes within 0.1 m | 256 / 362 |
+| successions stated in the file | 310 / 327 |
+| links asserted with no succession behind them | 0 |
+
+Those 242 are exact to the limit of the check: the smallest deviation it can
+measure is the 48 µm projection offset itself, and that is what they sit at. The
+reference line follows real input coordinates, so the innermost lane's inner
+boundary *is* the lanelet's bound. The lanes that deviate are the ones whose
+boundary is reconstructed by adding fitted widths, and the error grows with how
+many lanes it has to add: median 0.00 m at one lane per side, 1.23 m at four.
+
+The remaining gaps are reported by the run itself: 7 successions cross a branch
+point too tangled to build (`I901`), 6 belong to crosswalks, which become objects
+rather than routable lanes, and 2 sit either side of a cross-section whose members
+share no boundary (`W507`).
+
+This found the defects fixed in #8, #9, #10 and #13, none of which any golden file
+could have caught — several of the shapes involved do not occur in any fixture,
+which is exactly why a real map is needed.
+
 ## License
 
 Apache-2.0. See `LICENSE` and `NOTICE` — the test fixtures and the centerline
