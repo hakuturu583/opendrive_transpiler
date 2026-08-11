@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 from dataclasses import replace
 from itertools import pairwise
+from typing import NamedTuple
 
 from ..config import TranspileOptions
 from ..diagnostics import (
@@ -35,11 +36,13 @@ from ..diagnostics import (
     W_BAD_SPEED_LIMIT,
     W_BOUNDS_DISAGREE,
     W_BOUNDS_SWAPPED,
+    W_CONTRAFLOW_RIGHT,
     W_DEGENERATE_LANELET,
     W_EMPTY_SUBTYPE,
     W_NEGATIVE_WIDTH,
     W_PIVOT_REFERENCE,
     W_SHORT_ROAD,
+    W_STACK_NOT_SHARED,
     W_UNEQUAL_BOUND_ENDS,
     W_UNKNOWN_ROADMARK,
     W_UNKNOWN_SUBTYPE,
@@ -75,6 +78,42 @@ from ..topology import grouping, relations
 from ..topology.index import NodeIndex
 from . import furniture, junctions, localise, tables
 
+BoundaryKey = tuple[int, ...]
+
+
+class OrientedBounds(NamedTuple):
+    """A lanelet's bounds with the geometric left first.
+
+    The keys travel with the coordinates so a cross-section can tell whether two
+    members really share the boundary it is about to stack them on. Comparing
+    coordinates instead would answer a different question -- two distinct line
+    strings can run through the same place -- and node identity is what lanelet2
+    means by a shared bound.
+    """
+
+    left: list[Vec3]
+    right: list[Vec3]
+    left_attributes: dict[str, str]
+    right_attributes: dict[str, str]
+    left_key: BoundaryKey
+    right_key: BoundaryKey
+
+
+def boundary_key(boundary, index: NodeIndex) -> BoundaryKey:
+    """Identity of a boundary, independent of the direction it is stored in.
+
+    Two lanelets sharing a bound traverse it opposite ways, so a line string and
+    its reverse have to hash alike.
+
+    Identity comes from the `NodeIndex` rather than from the point objects,
+    because that is the notion adjacency was inferred with: a script that builds
+    two neighbours from separately constructed `Point3d` at the same coordinate
+    still means them to share the bound, and storage identity alone would call
+    every such pair unshared.
+    """
+    keys = index.signature(boundary)
+    return min(keys, tuple(reversed(keys)))
+
 
 def build_model(
     ir: MapIR, bag: DiagnosticBag, options: TranspileOptions
@@ -109,7 +148,7 @@ def build_model(
 
     _report_topology(network, ir, crosswalks, bag, options)
 
-    builder = _RoadBuilder(ir, options, bag, rels)
+    builder = _RoadBuilder(ir, options, bag, rels, index)
     chain_of_group: dict[int, int] = {}
     for chain_index, chain in enumerate(network.chains):
         for group in chain.groups:
@@ -428,16 +467,19 @@ class _RoadBuilder:
         options: TranspileOptions,
         bag: DiagnosticBag,
         rels: relations.Relations,
+        index: NodeIndex,
     ) -> None:
         self.ir = ir
         self.options = options
         self.bag = bag
         self.rels = rels
+        self.index = index
         self._swap_reported: set[int] = set()
+        self._unshared_reported: set[tuple[int, int]] = set()
         self._references: dict[int, list[Vec3]] = {}
 
     # -- orientation -------------------------------------------------------
-    def oriented_bounds(self, lanelet: LaneletIR) -> tuple[list[Vec3], list[Vec3], dict, dict]:
+    def oriented_bounds(self, lanelet: LaneletIR) -> OrientedBounds:
         """Bounds ordered so the first really is on the geometric left.
 
         Hand-written maps get this wrong often enough to be worth checking --
@@ -457,8 +499,22 @@ class _RoadBuilder:
                     "left of the bound named 'left'; using the geometric left as the "
                     "reference line",
                 )
-            return right_coords, left_coords, right.attributes, left.attributes
-        return left_coords, right_coords, left.attributes, right.attributes
+            return OrientedBounds(
+                right_coords,
+                left_coords,
+                right.attributes,
+                left.attributes,
+                boundary_key(right, self.index),
+                boundary_key(left, self.index),
+            )
+        return OrientedBounds(
+            left_coords,
+            right_coords,
+            left.attributes,
+            right.attributes,
+            boundary_key(left, self.index),
+            boundary_key(right, self.index),
+        )
 
     # -- assembly ----------------------------------------------------------
     def build_road(self, chain: grouping.RoadChain, road_id: int) -> RoadSpec | None:
@@ -476,6 +532,7 @@ class _RoadBuilder:
         ]
 
         self._report_pivot(chain, road_id)
+        self._report_contraflow(chain, road_id)
 
         concatenated: list[Vec3] = []
         for piece in group_refs:
@@ -570,29 +627,74 @@ class _RoadBuilder:
         so lane `k` lies between boundary `k` and `k+1` and belongs to `m_k`.
         Expressing a cross-section this way is what lets the reference line sit
         anywhere in the stack rather than only at its left edge.
+
+        That layout holds only while each member's left edge really is the
+        previous member's right edge, and on a surveyed map it sometimes is not:
+        a mapper may name both neighbours' shared bound "right", or name it left
+        on one and right on the other, with no direction change to reveal it. So
+        each join is checked by node identity, and a member whose edges turn out
+        to be mirrored is turned round rather than stacked from the wrong sides.
         """
         lanelets = self.ir.lanelets
         boundaries: list[list[Vec3]] = []
         attributes: list[dict[str, str]] = []
         owners: list[LaneletIR] = []
+        previous_key: BoundaryKey | None = None
 
         for position, member in enumerate(group.members):
             lanelet = lanelets[member]
-            left, right, left_attrs, right_attrs = self.oriented_bounds(lanelet)
+            bounds = self.oriented_bounds(lanelet)
+            left, right = bounds.left, bounds.right
+            left_attrs, right_attrs = bounds.left_attributes, bounds.right_attributes
+            left_key, right_key = bounds.left_key, bounds.right_key
             if group.reversed_[position]:
                 # This lanelet faces the other way, so its own right edge is the
                 # road's left edge, and its polylines have to be turned round to
                 # run with the road's s-axis.
                 left, right = list(reversed(right)), list(reversed(left))
                 left_attrs, right_attrs = right_attrs, left_attrs
+                left_key, right_key = right_key, left_key
+
+            if previous_key is not None and left_key != previous_key:
+                if right_key == previous_key:
+                    # Mirrored relative to the group: the edge it calls its outer
+                    # one is the edge it shares with its neighbour.
+                    left, right = list(reversed(right)), list(reversed(left))
+                    left_attrs, right_attrs = right_attrs, left_attrs
+                    left_key, right_key = right_key, left_key
+                else:
+                    self._report_unshared(group.members[position - 1], member)
+
             if position == 0:
                 boundaries.append(left)
                 attributes.append(left_attrs)
             boundaries.append(right)
             attributes.append(right_attrs)
             owners.append(lanelet)
+            previous_key = right_key
 
         return boundaries, attributes, owners
+
+    def _report_unshared(self, previous: int, member: int) -> None:
+        """Say when two lanelets placed side by side share no boundary at all.
+
+        Adjacency was inferred from a shared bound, so reaching here means the
+        pair shares one that neither of them has left over -- the cross-section
+        is then built from unrelated edges and its widths mean nothing. Stating
+        it is the least that can be done; the alternative of silently stacking
+        them is what made this class of error invisible.
+        """
+        lanelets = self.ir.lanelets
+        pair = (lanelets[previous].lanelet2_id, lanelets[member].lanelet2_id)
+        if pair in self._unshared_reported:
+            return
+        self._unshared_reported.add(pair)
+        self.bag.warn(
+            W_STACK_NOT_SHARED,
+            f"lanelets #{pair[0]} and #{pair[1]} are placed side by side in one "
+            "cross-section but share no boundary between them, so the lane widths "
+            "across that join are measured between unrelated edges",
+        )
 
     def centre_boundary(self, group: grouping.LaneGroup) -> int | None:
         """For a two-way group, the boundary dividing the two carriageways.
@@ -601,6 +703,16 @@ class _RoadBuilder:
         `+` side and forward lanes on the `-` side, which is precisely what an
         OpenDRIVE left lane means. Any other choice puts traffic on the wrong
         side of the reference line, so this overrides `--reference-line`.
+
+        Only the `reversed, ..., forward, ...` order can be divided this way, and
+        that is the order right-hand traffic produces. The mirror order --
+        forward lanes with something coming the other way to their *right*, a
+        contraflow cycle track being the usual case -- has no dividing boundary
+        at all: `+` means left, so a member that must be `+` cannot be on the
+        right. Flipping the road's direction does not help, because it reverses
+        the stack and inverts every flag at once and so preserves the order.
+        `contraflow_on_the_right` names that case for reporting; here it just
+        means there is nothing to return.
         """
         if not group.two_way:
             return None
@@ -610,6 +722,46 @@ class _RoadBuilder:
                 # next one, and the direction changes across it.
                 return position + 1
         return None
+
+    @staticmethod
+    def contraflow_on_the_right(group: grouping.LaneGroup) -> list[int]:
+        """Members that travel against the road while lying right of a forward one.
+
+        These are the ones the sign convention cannot describe. Returned rather
+        than reported here so the caller can name the road they ended up in.
+        """
+        if not group.two_way:
+            return []
+        seen_forward = False
+        out: list[int] = []
+        for position, member in enumerate(group.members):
+            if group.reversed_[position]:
+                if seen_forward:
+                    out.append(member)
+            else:
+                seen_forward = True
+        return out
+
+    def _report_contraflow(self, chain: grouping.RoadChain, road_id: int) -> None:
+        """Say when a lane's id claims a direction the lanelet does not travel.
+
+        Emitting it as `-1` and saying nothing is the harmful outcome: a consumer
+        reads a right lane as running with `s`, and here it runs against it. The
+        geometry is still the input's own, so the lane is in the right place --
+        only the direction the sign implies is wrong.
+        """
+        for group in chain.groups:
+            members = self.contraflow_on_the_right(group)
+            if not members:
+                continue
+            names = ", ".join(f"#{self.ir.lanelets[i].lanelet2_id}" for i in members)
+            self.bag.warn(
+                W_CONTRAFLOW_RIGHT,
+                f"road {road_id}: lanelet(s) {names} travel against the road but lie to "
+                "the right of lanes that travel with it, which no lane id can express "
+                "(`+` means left); they are emitted as right lanes, so their id reads as "
+                "travelling with s when they do not",
+            )
 
     def _report_pivot(self, chain: grouping.RoadChain, road_id: int) -> None:
         """Say when the reference line had to move off the leftmost boundary.

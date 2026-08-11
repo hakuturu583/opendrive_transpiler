@@ -425,6 +425,19 @@ class ScenarioGenerationEmitter:
 
         writer.line(f"{name}.add_roadmark({_mark_expr(lane.road_mark)})")
 
+        # Which lanelet this lane is, in the file rather than only in a comment.
+        # Without it the road `name` is the only provenance a reader gets, and that
+        # carries just the first and last id of the chain -- so a converted map
+        # cannot be checked against the map it came from.
+        for code, value in (
+            ("lanelet2_id", str(lane.lanelet2_id) if lane.lanelet2_id else ""),
+            ("lanelet2_subtype", lane.subtype),
+        ):
+            if value:
+                writer.line(
+                    f'{name}.add_userdata(xodr.UserData("{code}", {literal(value)}))'
+                )
+
         if lane.predecessor is not None:
             writer.line(f'{name}.add_link("predecessor", {literal(lane.predecessor)})')
         if lane.successor is not None:
