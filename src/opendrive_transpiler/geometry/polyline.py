@@ -42,7 +42,10 @@ def stations(points: Sequence[Vec3]) -> list[float]:
 
 
 def total_length(points: Sequence[Vec3]) -> float:
-    return sum(segment_lengths(points))
+    # fsum, not sum: CPython 3.12 changed sum() on floats to compensated
+    # summation, so a plain sum makes the emitted geometry depend on the
+    # interpreter version. fsum is exactly rounded, and the same everywhere.
+    return math.fsum(segment_lengths(points))
 
 
 def headings(points: Sequence[Vec3]) -> list[float]:

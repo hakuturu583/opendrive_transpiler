@@ -18,6 +18,7 @@ OpenDRIVE permits an off-centre reference line, and consumers handle it.
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from itertools import pairwise
 
@@ -630,7 +631,8 @@ class _RoadBuilder:
             return 0
         stations_ = sample_stations(reference, self.options.width_sample_step)
         offsets = [
-            sum(abs(t) for t in offsets_along(reference, stations_, bound)) / max(len(stations_), 1)
+            math.fsum(abs(t) for t in offsets_along(reference, stations_, bound))
+            / max(len(stations_), 1)
             for bound in boundaries
         ]
         return min(range(len(offsets)), key=lambda i: offsets[i])
