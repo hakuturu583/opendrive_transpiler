@@ -434,9 +434,7 @@ class ScenarioGenerationEmitter:
             ("lanelet2_subtype", lane.subtype),
         ):
             if value:
-                writer.line(
-                    f'{name}.add_userdata(xodr.UserData("{code}", {literal(value)}))'
-                )
+                writer.line(f'{name}.add_userdata(xodr.UserData("{code}", {literal(value)}))')
 
         if lane.predecessor is not None:
             writer.line(f'{name}.add_link("predecessor", {literal(lane.predecessor)})')

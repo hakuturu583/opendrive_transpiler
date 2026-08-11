@@ -54,12 +54,12 @@ def test_the_lanelet_id_reaches_the_generated_script():
     result = convert(TWO_LANES)
     lanes = [lane for road in result.model.roads for lane in road.lane_sections[0].lanes]
     for lane in lanes:
-        assert f'xodr.UserData("lanelet2_id", \'{lane.lanelet2_id}\')' in result.code
+        assert f"xodr.UserData(\"lanelet2_id\", '{lane.lanelet2_id}')" in result.code
 
 
 def test_the_subtype_reaches_it_too():
     result = convert(TWO_LANES)
-    assert 'xodr.UserData("lanelet2_subtype", \'road\')' in result.code
+    assert "xodr.UserData(\"lanelet2_subtype\", 'road')" in result.code
 
 
 def test_a_road_built_from_three_lanelets_records_all_three():
@@ -82,7 +82,7 @@ lanelet_map = createMapFromLanelets(lls)
     recorded = {lane.lanelet2_id for lane in road.lane_sections[0].lanes}
     assert len(recorded) == 3, "each lane names a different lanelet"
     for lanelet_id in recorded:
-        assert f'"lanelet2_id", \'{lanelet_id}\'' in result.code
+        assert f"\"lanelet2_id\", '{lanelet_id}'" in result.code
 
 
 # --------------------------------------------------------------------------
