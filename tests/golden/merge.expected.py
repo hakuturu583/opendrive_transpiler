@@ -3,8 +3,7 @@
 source:  tests/fixtures/merge.py
 sha256:  8b8841b60d68d42037e48959b43f605106dbb0209317863860b5f799f95f42cc
 summary: 4/4 lanelets converted, 3 roads, 4 lanes
-notices: 1 warning(s)
-    LL2ODR-W509: road 3 is entered by more than one road; it keeps the join from road 1 and road 2 is left unjoined, because a road carries one <predecessor> and a merge needs a junction to express
+notices: none
 
 Run this file to write merge.xodr. Requires scenariogeneration:
     pip install "opendrive-transpiler[emit]"
@@ -33,7 +32,6 @@ def build() -> xodr.OpenDrive:
     lane_1_0_m1.add_roadmark(xodr.RoadMark(xodr.RoadMarkType.none))
     lane_1_0_m1.add_userdata(xodr.UserData("lanelet2_id", '4'))
     lane_1_0_m1.add_userdata(xodr.UserData("lanelet2_subtype", 'road'))
-    lane_1_0_m1.add_link("successor", -2)
     ls_1_0.add_right_lane(lane_1_0_m1)
     lanes_1.add_lanesection(ls_1_0)
 
@@ -90,14 +88,12 @@ def build() -> xodr.OpenDrive:
     lane_3_0_m2.add_roadmark(xodr.RoadMark(xodr.RoadMarkType.none))
     lane_3_0_m2.add_userdata(xodr.UserData("lanelet2_id", '16'))
     lane_3_0_m2.add_userdata(xodr.UserData("lanelet2_subtype", 'road'))
-    lane_3_0_m2.add_link("predecessor", -1)
     ls_3_0.add_right_lane(lane_3_0_m2)
     lanes_3.add_lanesection(ls_3_0)
 
     road_3 = xodr.Road(3, pv_3, lanes_3, road_type=1, name='lanelets_19_16')
     road_3.add_type(xodr.RoadType.unknown, 0.0)
     road_3.add_elevation(0.0, 0.0, 0.0, 0.0, 0.0)
-    road_3.add_predecessor(xodr.ElementType.road, 1, contact_point=xodr.ContactPoint.end)
     odr.add_road(road_3)
 
     # ---- junction 1  (2 connection(s)) ---------------------------------

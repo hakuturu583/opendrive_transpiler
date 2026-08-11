@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from opendrive_transpiler import TranspileOptions, transpile_source
+from opendrive_transpiler.odr.model import LinkSpec
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -177,26 +178,75 @@ def test_an_opposing_pair_is_stacked_left_to_right():
 # --------------------------------------------------------------------------
 
 
-def test_a_merge_states_only_the_join_its_road_level_link_names():
-    """A lane's `<predecessor id>` is resolved in the road the road-level link names.
+@pytest.mark.parametrize(
+    "fixture", sorted(p.name for p in FIXTURES.glob("*.py") if not p.name.startswith("_"))
+)
+def test_no_lane_link_resolves_in_a_road_the_file_does_not_name(fixture: str):
+    """The invariant behind #10, over every fixture.
 
-    Two roads merging into one both used to write their lane links in, while the
-    road-level `<predecessor>` could name only one of them -- so the other's lane
-    ids were resolved in a road they did not come from. That is worse than a gap,
-    because it reads as connectivity.
+    A lane's `<predecessor id>` / `<successor id>` is read against the road named
+    by the road-level link. A lane link with no road-level link to resolve it, or
+    naming a lane that road does not have, is worse than a gap: it reads as
+    connectivity that is not there.
+
+    Stated as an invariant rather than against one mechanism, because which
+    mechanism carries a join changes -- a merge is a junction now, and was a
+    road-to-road link before.
+    """
+    result = convert((FIXTURES / fixture).read_text(encoding="utf-8"))
+    by_id = {road.road_id: road for road in result.model.roads}
+
+    for road in result.model.roads:
+        if not road.lane_sections:
+            continue
+        for tag, link, section in (
+            ("predecessor", road.predecessor, road.lane_sections[0]),
+            ("successor", road.successor, road.lane_sections[-1]),
+        ):
+            for lane in section.lanes:
+                target = getattr(lane, tag)
+                if target is None:
+                    continue
+                assert link is not None and link.element_type == "road", (
+                    f"road {road.road_id} lane {lane.lane_id} states a {tag} of {target} "
+                    f"with no road-level link to resolve it against (link={link})"
+                )
+                far = by_id[link.element_id]
+                available = {
+                    other.lane_id for section in far.lane_sections for other in section.lanes
+                }
+                assert target in available, (
+                    f"road {road.road_id} lane {lane.lane_id} states a {tag} of {target}, "
+                    f"which road {far.road_id} does not have"
+                )
+
+
+def test_two_roads_merging_are_expressed_as_a_junction():
+    """A merge is a branch point, so the junction carries it -- both sides of it.
+
+    A road holds one `<predecessor>`, so road-level links cannot state a merge:
+    one approach would be left out. The junction states each approach against the
+    lane it feeds, which is why junctions are built before the road-to-road pass
+    rather than after it.
     """
     result = convert((FIXTURES / "merge.py").read_text(encoding="utf-8"))
+    assert len(result.model.junctions) == 1
+    junction = result.model.junctions[0]
+
     merged = max(result.model.roads, key=lambda road: len(road.lane_sections[0].lanes))
-    assert len(merged.lane_sections[0].lanes) == 2
-    assert merged.predecessor is not None
+    assert merged.junction == junction.junction_id, "the merged road is the connecting road"
 
-    stated = [lane for lane in merged.lane_sections[0].lanes if lane.predecessor is not None]
-    assert len(stated) == 1, "only the approach the road-level link names can state a lane"
+    approaches = [road for road in result.model.roads if road.road_id != merged.road_id]
+    assert len(approaches) == 2
+    for road in approaches:
+        assert road.successor == LinkSpec("junction", junction.junction_id)
 
-
-def test_the_unjoined_side_of_a_merge_is_reported():
-    result = convert((FIXTURES / "merge.py").read_text(encoding="utf-8"))
-    assert "LL2ODR-W509" in codes(result)
+    # Each approach feeds a different lane of the merged road, stated explicitly.
+    fed = {to for connection in junction.connections for _from, to in connection.lane_links}
+    assert len(fed) == 2
+    assert {connection.incoming_road for connection in junction.connections} == {
+        road.road_id for road in approaches
+    }
 
 
 def test_a_plain_continuation_still_links_both_ways():
