@@ -5,11 +5,14 @@ lanelet's two bounds to span the same stretch of it, so a road that follows the
 left bound can end before the lanelet does and drop the rest -- 330 m of the
 Lanelet2 Karlsruhe example map, a third of one lanelet in the worst case.
 
-`--reference-line=auto` follows lanelet2's centerline on exactly those roads. It
-is not the default because the recovery is not free: OpenDRIVE places a lane edge
-at an offset measured *perpendicular* to the reference line, so a bound running
-at an angle to it cannot be followed by one scalar per station. Extent and
-boundary placement cannot both be had, and which matters is the caller's to say.
+`--reference-line=auto` follows lanelet2's centerline on exactly those roads. It is
+not the default because the recovery is not free: the left bound then lands a
+median 1.1 m from the emitted lane edge.
+
+That cost is coverage, not the lane model. A lane edge sits at `C + t * n`, and
+wherever the boundary lies under that normal the placement is exact; what a
+lanelet which outruns its bound has instead is stretches with no left bound to
+measure. Which side of the trade matters is the caller's to say.
 """
 
 from __future__ import annotations
