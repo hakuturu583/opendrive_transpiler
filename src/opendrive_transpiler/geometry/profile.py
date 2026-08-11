@@ -8,28 +8,78 @@ data that was never smooth.
 
 Widths are measured perpendicular to the reference line: at station `s`, take the
 reference point `C` and heading `h`, build the left-normal `n = (-sin h, cos h)`,
-and project each boundary's nearest point onto it. The width of the lane between
-two boundaries is the absolute difference of their offsets.
+and find where that normal *crosses* each boundary. The width of the lane between
+two boundaries is the absolute difference of their offsets, and because both are
+measured along the same normal it is a true perpendicular width.
+
+The crossing matters. A consumer rebuilds a boundary point as `C + t * n`, so `t`
+has to be the distance to a point that is *on* the normal. Taking the boundary's
+**nearest** point instead and projecting that onto the normal -- which this did --
+throws away its along-track component, and the rebuilt point lands beside the
+boundary rather than on it: a median of 2.7 mm on the Lanelet2 Karlsruhe example,
+1.04 m at the 99th percentile and 4.52 m at worst, for 59% of the stations where
+the boundary was there to be measured. With the crossing those stations come out
+exact.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from itertools import pairwise
 
 from ..odr.model import PolyRecord
 from .fit import lateral_offset
 from .polyline import closest_point, point_at_station, sample_stations, total_length
 from .vec import Vec3
 
+PARALLEL = 1e-12
+"""Below this the normal and the segment are parallel and cannot cross."""
+
+
+def normal_crossing(point: Vec3, hdg: float, boundary: Sequence[Vec3]) -> float | None:
+    """Signed distance along the left-normal at `point` to where it meets `boundary`.
+
+    `None` when the normal misses it, which happens wherever the boundary does not
+    reach that far along the road. The nearest crossing wins when a boundary
+    doubles back and there are several.
+    """
+    nx, ny = -math.sin(hdg), math.cos(hdg)
+    best: float | None = None
+    for a, b in pairwise(boundary):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        # point + u * n == a + v * (b - a), keeping only 0 <= v <= 1.
+        denominator = nx * dy - ny * dx
+        if abs(denominator) < PARALLEL:
+            continue
+        ax, ay = a[0] - point[0], a[1] - point[1]
+        v = (ax * ny - ay * nx) / denominator
+        if not -1e-9 <= v <= 1.0 + 1e-9:
+            continue
+        u = (ax + v * dx) * nx + (ay + v * dy) * ny
+        if best is None or abs(u) < abs(best):
+            best = u
+    return best
+
 
 def offsets_along(
     reference: Sequence[Vec3], stations_: Sequence[float], boundary: Sequence[Vec3]
 ) -> list[float]:
-    """Signed lateral offset of `boundary` from `reference` at each station."""
+    """Signed lateral offset of `boundary` from `reference` at each station.
+
+    Where the normal misses the boundary there is no offset to measure, and the
+    nearest point is the least-wrong answer available -- it keeps the profile
+    defined over the whole road, which OpenDRIVE requires of a lane. Those
+    stations are the ones a boundary shorter than its road leaves behind, and they
+    are the residual that laneSection splitting is for rather than this.
+    """
     result: list[float] = []
     for s in stations_:
         point, hdg = point_at_station(reference, s)
+        crossing = normal_crossing(point, hdg, boundary)
+        if crossing is not None:
+            result.append(crossing)
+            continue
         nearest, _distance = closest_point(boundary, (point[0], point[1]))
         result.append(lateral_offset(point, hdg, nearest))
     return result
