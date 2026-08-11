@@ -95,7 +95,7 @@ def build() -> xodr.OpenDrive:
     center_3_0.add_roadmark(xodr.RoadMark(xodr.RoadMarkType.none))
     ls_3_0 = xodr.LaneSection(0.0, center_3_0)
     # lane -1  <-  lanelet #13 (subtype='road'), width 2.83158 m (constant)
-    lane_3_0_m1 = xodr.Lane(lane_type=xodr.LaneType.driving, a=2.831575069098053, soffset=0.0)
+    lane_3_0_m1 = xodr.Lane(lane_type=xodr.LaneType.driving, a=2.8315750690980526, soffset=0.0)
     lane_3_0_m1.add_roadmark(xodr.RoadMark(xodr.RoadMarkType.none))
     lane_3_0_m1.add_userdata(xodr.UserData("lanelet2_id", '13'))
     lane_3_0_m1.add_userdata(xodr.UserData("lanelet2_subtype", 'road'))
