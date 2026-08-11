@@ -50,6 +50,8 @@ def build() -> xodr.OpenDrive:
     lane_1_0_m1.add_lane_width(a=4.483144555146902, b=0.03366027105307576, soffset=44.88913670132932)
     lane_1_0_m1.add_lane_width(a=4.815249993009376, b=0.033809915041102985, soffset=54.744611501632576)
     lane_1_0_m1.add_roadmark(xodr.RoadMark(xodr.RoadMarkType.curb))
+    lane_1_0_m1.add_userdata(xodr.UserData("lanelet2_id", '29'))
+    lane_1_0_m1.add_userdata(xodr.UserData("lanelet2_subtype", 'road'))
     ls_1_0.add_right_lane(lane_1_0_m1)
     lanes_1.add_lanesection(ls_1_0)
 
