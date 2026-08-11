@@ -62,6 +62,65 @@ def normal_crossing(point: Vec3, hdg: float, boundary: Sequence[Vec3]) -> float 
     return best
 
 
+def _crosses(reference: Sequence[Vec3], s: float, boundary: Sequence[Vec3]) -> bool:
+    point, hdg = point_at_station(reference, s)
+    return normal_crossing(point, hdg, boundary) is not None
+
+
+def _edge(
+    reference: Sequence[Vec3],
+    boundary: Sequence[Vec3],
+    absent: float,
+    present: float,
+    precision: float,
+) -> float:
+    """Bisect towards the station where `boundary` first comes under the normal."""
+    while abs(present - absent) > precision:
+        middle = (absent + present) / 2.0
+        if _crosses(reference, middle, boundary):
+            present = middle
+        else:
+            absent = middle
+    return present
+
+
+def boundary_extent(
+    reference: Sequence[Vec3],
+    stations_: Sequence[float],
+    boundary: Sequence[Vec3],
+    *,
+    precision: float = 1e-3,
+) -> tuple[float, float] | None:
+    """The stretch of `reference` over which its normal actually meets `boundary`.
+
+    `None` when it never does. The result is the *outer* span: an interior
+    station the normal happens to miss -- one in a thousand on the Lanelet2
+    Karlsruhe example, where a bound doubles back sharply -- is inside the
+    extent, because a boundary that resumes has not ended.
+
+    The ends are bisected to `precision` rather than snapped to a sample, so the
+    station a laneSection splits at is the station the boundary really starts at
+    and not wherever the 5 m sampling happened to land.
+    """
+    present = [_crosses(reference, s, boundary) for s in stations_]
+    if not any(present):
+        return None
+
+    first = present.index(True)
+    last = len(present) - 1 - present[::-1].index(True)
+    start = (
+        stations_[first]
+        if first == 0
+        else _edge(reference, boundary, stations_[first - 1], stations_[first], precision)
+    )
+    end = (
+        stations_[last]
+        if last == len(present) - 1
+        else _edge(reference, boundary, stations_[last + 1], stations_[last], precision)
+    )
+    return start, end
+
+
 def offsets_along(
     reference: Sequence[Vec3], stations_: Sequence[float], boundary: Sequence[Vec3]
 ) -> list[float]:

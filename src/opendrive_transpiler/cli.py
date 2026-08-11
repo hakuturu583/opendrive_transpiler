@@ -136,6 +136,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fit one cubic per width/elevation profile where it fits within tolerance",
     )
+    geometry.add_argument(
+        "--split-at-bound-extent",
+        action="store_true",
+        help=(
+            "cut a <laneSection> where a lane boundary starts and ends, tapering "
+            "the lane to zero width over the stretch where its boundary is absent, "
+            "instead of guessing a width there from the boundary's nearest point"
+        ),
+    )
+    geometry.add_argument(
+        "--bound-extent-gap",
+        type=float,
+        default=2.0,
+        metavar="M",
+        help=(
+            "shortest absent stretch worth cutting a laneSection for "
+            "(default 2.0; only used with --split-at-bound-extent)"
+        ),
+    )
 
     topology = parser.add_argument_group("topology")
     topology.add_argument(
@@ -191,6 +210,8 @@ def options_from(args: argparse.Namespace) -> TranspileOptions:
         chord_tolerance=args.chord_tolerance,
         width_sample_step=args.width_sample_step,
         cubic_profiles=args.cubic_profiles,
+        split_at_bound_extent=args.split_at_bound_extent,
+        bound_extent_gap=args.bound_extent_gap,
         junctions=args.junctions,
         signals=args.signals,
         objects=args.objects,

@@ -28,6 +28,7 @@ from opendrive_transpiler.geometry.polyline import (
     total_length,
 )
 from opendrive_transpiler.geometry.profile import (
+    boundary_extent,
     build_profile,
     lane_widths,
     normal_crossing,
@@ -254,6 +255,43 @@ def test_a_normal_that_misses_the_boundary_has_no_crossing():
     values = offsets_along([(0.0, 0.0, 0.0), (60.0, 0.0, 0.0)], [5.0, 50.0], boundary)
     assert len(values) == 2
     assert math.isclose(values[0], -3.0, abs_tol=1e-9)
+
+
+def test_a_boundarys_extent_is_bisected_rather_than_snapped_to_a_sample():
+    """The cut has to be where the boundary starts, not where sampling landed.
+
+    Samples here are 10 m apart and the boundary starts at 23.7, so snapping to a
+    sample would put the cut 3.7 m out and leave the section it opens with a
+    stretch it still cannot measure.
+    """
+    reference = [(0.0, 0.0, 0.0), (100.0, 0.0, 0.0)]
+    boundary = [(23.7, -3.0, 0.0), (71.4, -3.0, 0.0)]
+    stations = [float(s) for s in range(0, 101, 10)]
+
+    extent = boundary_extent(reference, stations, boundary)
+    assert extent is not None
+    start, end = extent
+    assert math.isclose(start, 23.7, abs_tol=2e-3)
+    assert math.isclose(end, 71.4, abs_tol=2e-3)
+
+
+def test_a_boundary_no_normal_reaches_has_no_extent():
+    reference = [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0)]
+    boundary = [(50.0, -3.0, 0.0), (60.0, -3.0, 0.0)]
+    assert boundary_extent(reference, [0.0, 5.0, 10.0], boundary) is None
+
+
+def test_a_boundary_the_normal_misses_in_the_middle_is_still_one_extent():
+    """A bound that doubles back has an interior station with no crossing.
+
+    One in a thousand on the Karlsruhe map. Reporting that as two extents would
+    cut the section either side of a single sample; a boundary that resumes has
+    not ended.
+    """
+    reference = [(0.0, 0.0, 0.0), (100.0, 0.0, 0.0)]
+    boundary = [(0.0, -3.0, 0.0), (40.0, -3.0, 0.0), (30.0, -6.0, 0.0), (100.0, -6.0, 0.0)]
+    extent = boundary_extent(reference, [float(s) for s in range(0, 101, 10)], boundary)
+    assert extent == (0.0, 100.0)
 
 
 def test_the_width_between_two_angled_bounds_is_the_perpendicular_one():

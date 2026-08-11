@@ -433,6 +433,7 @@ machine-readable. Exit codes: `0` clean, `1` warnings under `--strict`,
 --fit {line,arc,parampoly3}          # exact lines (default), arcs, or C1 cubics
 --reference-line {left-bound,centerline,auto}
 --cubic-profiles                     # one cubic per width/elevation where it fits
+--split-at-bound-extent              # cut a laneSection where a boundary starts/ends
 --no-junctions --no-signals --no-objects
 ```
 
@@ -471,13 +472,41 @@ out. `auto` therefore turns a *missing stretch of road* into a *lane edge placed
 by guesswork over that stretch*, and neither is free.
 
 Which to pick still depends on what the output is for — routing and coverage want
-`auto`, anything measuring against the source geometry wants the default — but the
-residual is a coverage problem, so splitting a `laneSection` where a boundary
-starts and ends is the thing that would actually shrink it. That is how OpenDRIVE
-is authored in practice, and it is not done here yet.
+`auto`, anything measuring against the source geometry wants the default.
 
 Either way the run says what it did — `W503` gives the shortfall in metres and
 the fraction covered, `W510` names each road moved off its bound.
+
+### `--split-at-bound-extent`: saying where a lane is not
+
+The residual above is a *coverage* problem, and the way OpenDRIVE is authored in
+practice is to cut the `laneSection` where a boundary starts and ends rather than
+carry one section across the gap. `--split-at-bound-extent` does that: the cut
+lands on the station the boundary really begins at (bisected, not snapped to a
+sample), and over the stretch where it is absent the lane **tapers to zero
+width** — a cross-section with no such lane in it, which is what the input
+actually says.
+
+On the Karlsruhe map, at the default 2 m threshold:
+
+| | default | `--split-at-bound-extent` |
+|---|---|---|
+| `<laneSection>` elements | 241 | 290 |
+| right-bound error, median | 0.313 m | **0.289 m** |
+| lanes over 0.1 m | 250 / 359 | **245** / 359 |
+| lanes whose id implies the wrong direction | 6 | **4** |
+| successions stated in the file | 310 / 327 | 310 / 327 |
+
+Per lane it is 25 improved (8.1 m of error removed, the worst by 2.23 m) against
+3 worsened by ~0.04 m each. `--bound-extent-gap` moves the threshold: at 0.5 m
+the median goes to 0.263 m for 400 sections, which is a poor trade for most
+consumers, and below that the sections get shorter than the sampling step.
+
+It is **opt-in** for two reasons. It says something stronger than the input does
+— lanelet2 gives a lanelet one polygon, not a width per station, so "the lane is
+0 m wide here" is an inference — and a lane at zero width carries no traffic, so
+a router will not route through the stretch that a default conversion lets it
+through. Every such stretch is named by `W511`.
 
 ## Documented assumptions
 
