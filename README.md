@@ -528,9 +528,17 @@ On the Lanelet2 Karlsruhe example map (`lanelet2_maps/res/mapping_example.osm`,
 | | |
 |---|---|
 | projection vs pyproj | 48 µm, constant |
-| lanes reproducing their lanelet's left bound to 0.000 m | 254 / 362 |
+| lanes reproducing their lanelet's left bound to within 0.1 mm | 242 / 362 |
+| lanes within 0.1 m | 256 / 362 |
 | successions stated in the file | 310 / 327 |
 | links asserted with no succession behind them | 0 |
+
+Those 242 are exact to the limit of the check: the smallest deviation it can
+measure is the 48 µm projection offset itself, and that is what they sit at. The
+reference line follows real input coordinates, so the innermost lane's inner
+boundary *is* the lanelet's bound. The lanes that deviate are the ones whose
+boundary is reconstructed by adding fitted widths, and the error grows with how
+many lanes it has to add: median 0.00 m at one lane per side, 1.23 m at four.
 
 The remaining gaps are reported by the run itself: 7 successions cross a branch
 point too tangled to build (`I901`), 6 belong to crosswalks, which become objects
