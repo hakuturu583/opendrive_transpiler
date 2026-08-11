@@ -260,8 +260,10 @@ def lane_widths(
 ) -> tuple[list[PolyRecord], float]:
     """Width records for the lane between `inner` and `outer`.
 
-    Returns the records and the minimum sampled width, so the caller can report a
-    lane whose bounds cross over (negative width is invalid OpenDRIVE).
+    The *distance* between two bounds, so the minimum returned alongside is never
+    negative and says nothing about whether they cross. Detecting that needs the
+    direction the lane runs in, which only the caller knows; `_build_lane` signs
+    the difference itself and reports the crossing as `W703`.
     """
     sts = list(stations_) if stations_ is not None else sample_stations(reference, max_step)
     inner_offsets = offsets_along(reference, sts, inner)

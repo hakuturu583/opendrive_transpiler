@@ -1272,9 +1272,19 @@ class _RoadBuilder:
         Offsets rather than polylines because a lane's inner edge is not always a
         boundary: where the lane inside it has collapsed to zero width the inner
         edge is wherever that collapse left it, and only the caller knows.
+
+        The width is signed by the direction the lane runs -- outward is falling
+        `t` on the right of the reference line and rising `t` on its left -- and
+        then clamped at zero. Taking the magnitude instead, which this did, hides
+        a cross-section whose bounds have crossed over *and* puts the lane's outer
+        edge on the wrong side of its inner one: as far past it as it should have
+        fallen short, so twice the error. `W703` exists to report exactly that and
+        could never fire, because the value it tested was already an absolute one.
         """
-        values = [abs(o - i) for i, o in zip(inner, outer, strict=False)]
-        minimum = min(values) if values else 0.0
+        outward = -1.0 if lane_id < 0 else 1.0
+        signed = [outward * (o - i) for i, o in zip(inner, outer, strict=False)]
+        minimum = min(signed) if signed else 0.0
+        values = [max(v, 0.0) for v in signed]
         widths = build_profile(
             stations_,
             values,
@@ -1285,8 +1295,10 @@ class _RoadBuilder:
         if minimum < 0.0:
             self.bag.warn(
                 W_NEGATIVE_WIDTH,
-                f"lanelet #{lanelet.lanelet2_id}: bounds cross over "
-                f"(minimum width {minimum:.4g} m)",
+                f"lanelet #{lanelet.lanelet2_id}: over {stations_[0]:.3g}-{stations_[-1]:.3g} m "
+                f"its outer bound crosses inside its inner one, by up to {-minimum:.4g} m; "
+                "the lane is emitted at zero width there, because OpenDRIVE has no "
+                "negative width",
             )
 
         lane_type, recognised = tables.lane_type_for(lanelet.subtype, one_way=lanelet.one_way)
