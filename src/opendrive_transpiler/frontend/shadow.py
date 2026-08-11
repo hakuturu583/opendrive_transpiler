@@ -616,6 +616,8 @@ class ProjectionInfo:
     lon: float = 0.0
     alt: float = 0.0
     use_offset: bool = True
+    mgrs_code: str = ""
+    """Set by `setMGRSCode`, which names a grid square instead of an origin."""
 
 
 @dataclass(eq=False)

@@ -134,6 +134,8 @@ class ProjectionIR:
     lon: float
     alt: float
     use_offset: bool
+    mgrs_code: str = ""
+    """An MGRS grid square, which georeferences without naming an origin."""
 
 
 @dataclass
@@ -245,6 +247,7 @@ def build_ir(
             lon=proj.lon,
             alt=proj.alt,
             use_offset=proj.use_offset,
+            mgrs_code=getattr(proj, "mgrs_code", ""),
         )
 
     seen_bounds: set[tuple[int, int]] = set()

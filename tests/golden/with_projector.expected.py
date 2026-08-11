@@ -15,7 +15,7 @@ from scenariogeneration import xodr
 
 def build() -> xodr.OpenDrive:
     """Build the OpenDRIVE model transpiled from tests/fixtures/with_projector.py."""
-    odr = xodr.OpenDrive('with_projector', revMajor='1', revMinor='5', geo_reference='+proj=utm +zone=32 +north +x_0=43885.40413814678 +y_0=-5427629.203876308 +datum=WGS84 +units=m +no_defs')
+    odr = xodr.OpenDrive('with_projector', revMajor='1', revMinor='5', geo_reference='+proj=tmerc +lat_0=0 +lon_0=9.0 +k_0=0.9996 +x_0=43885.40413814678 +y_0=-5427629.203876308 +datum=WGS84 +units=m +no_defs')
 
     # ---- road 1  <-  lanelet #30 ---------------------------------------
     # reference line: 1 geometry record(s), length 12.0416 m

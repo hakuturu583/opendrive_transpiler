@@ -16,7 +16,14 @@ import re
 from ..config import TranspileOptions
 from ..ir.model import ProjectionIR
 from ..odr.model import RoadMarkSpec
-from .proj import geodetic_to_ecef, mgrs_square_offsets, utm_offsets, utm_zone
+from .proj import (
+    central_meridian,
+    geodetic_to_ecef,
+    mgrs_code_offsets,
+    mgrs_square_offsets,
+    utm_offsets,
+    utm_zone,
+)
 
 # --------------------------------------------------------------------------
 # Lanelet subtype -> OpenDRIVE lane type
@@ -247,6 +254,22 @@ def speed_for(raw: str) -> tuple[float, str] | None:
 # --------------------------------------------------------------------------
 
 
+def _shifted_utm(zone: int, north: bool, x0: float, y0: float) -> str:
+    """A UTM zone whose origin has been moved, written so PROJ obeys the move.
+
+    Spelled out as the `tmerc` that `+proj=utm` is shorthand for, because `utm`
+    hardcodes its own false easting and northing and **silently ignores** any
+    `+x_0` / `+y_0` given alongside it. A string built the obvious way parses,
+    looks right, and puts the map on the equator: `(0, 0)` in
+    `+proj=utm +zone=32 +x_0=43885 +y_0=-5427629` comes back as 0.000000N
+    4.511256E instead of the origin it names.
+    """
+    return (
+        f"+proj=tmerc +lat_0=0 +lon_0={central_meridian(zone)!r} +k_0=0.9996 "
+        f"+x_0={x0!r} +y_0={y0!r} +datum=WGS84 +units=m +no_defs" + ("" if north else " +south")
+    )
+
+
 def geo_reference_for(projection: ProjectionIR | None) -> tuple[str | None, str | None]:
     """Returns `(proj_string, caveat)`.
 
@@ -261,15 +284,16 @@ def geo_reference_for(projection: ProjectionIR | None) -> tuple[str | None, str 
     lat, lon = projection.lat, projection.lon
 
     if kind == "utm":
-        hemisphere = "+north" if lat >= 0 else "+south"
-        parts = [f"+proj=utm +zone={utm_zone(lon)}", hemisphere]
         if projection.use_offset:
             # lanelet2 subtracts the origin's easting/northing, so the PROJ
             # string has to carry that shift or it points at the wrong continent.
             x0, y0 = utm_offsets(lat, lon)
-            parts.append(f"+x_0={x0!r} +y_0={y0!r}")
-        parts.append("+datum=WGS84 +units=m +no_defs")
-        return " ".join(parts), None
+            return _shifted_utm(utm_zone(lon), lat >= 0, x0, y0), None
+        hemisphere = "+north" if lat >= 0 else "+south"
+        return (
+            f"+proj=utm +zone={utm_zone(lon)} {hemisphere} +datum=WGS84 +units=m +no_defs",
+            None,
+        )
 
     if kind == "mercator":
         return (
@@ -294,11 +318,21 @@ def geo_reference_for(projection: ProjectionIR | None) -> tuple[str | None, str 
     if kind == "mgrs":
         # MGRS coordinates are metres inside a 100 km grid square, which is UTM
         # shifted to that square's south-west corner.
+        if projection.mgrs_code:
+            # `setMGRSCode` names the square outright, so no origin is needed --
+            # and this is how Autoware maps are georeferenced.
+            decoded = mgrs_code_offsets(projection.mgrs_code)
+            if decoded is None:
+                return None, (
+                    f"MGRS code {projection.mgrs_code!r} is not a 100 km grid square "
+                    "designator (zone, band, two letters); <geoReference> omitted"
+                )
+            zone, x0, y0, square_lat = decoded
+            return _shifted_utm(zone, square_lat >= 0, x0, y0), None
+
         x0, y0 = mgrs_square_offsets(lat, lon)
-        hemisphere = "+north" if lat >= 0 else "+south"
         return (
-            f"+proj=utm +zone={utm_zone(lon)} {hemisphere} +x_0={x0!r} +y_0={y0!r} "
-            "+datum=WGS84 +units=m +no_defs",
+            _shifted_utm(utm_zone(lon), lat >= 0, x0, y0),
             "MGRS coordinates were reproduced as UTM offset to the origin's 100 km "
             "square; the grid-square letters themselves are not carried in PROJ",
         )

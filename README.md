@@ -203,6 +203,12 @@ OpenDRIVE's object type is for, and reported as `LL2ODR-I910` because it costs
 something real: the crossing is no longer a routable path. A `walkway` or
 `shared_walkway` runs *alongside* a road and is still a road.
 
+**A shifted UTM zone is written as `tmerc`, not `utm`.** `+proj=utm` hardcodes
+its false easting and northing and *silently ignores* any `+x_0` / `+y_0`
+alongside it, so the obvious string parses, reads correctly, and puts the map on
+the equator. Every shifted frame — `useOffset=True`, and every MGRS square —
+therefore spells out the `tmerc` that `utm` is shorthand for.
+
 **Nothing is dropped silently.** Every feature that is recognised but not
 converted emits a diagnostic naming it, and the same list is repeated in the
 generated file's header. A half-converted HD map that looks complete is worse
@@ -258,6 +264,11 @@ things and the difference matters when planning around it.
 - [x] `with` (body executed; the context manager itself cannot affect the map)
 - [x] `global` / `nonlocal`, `assert` (no-op), `pass`
 - [x] Every lanelet2 import form (see below), plus `import math`
+- [x] Local modules beside the script — `from helpers import ...`, packages,
+      `import *`, relative imports. They are *interpreted*, not imported, so the
+      guarantee holds; each one resolved is recorded (`LL2ODR-I305`) because the
+      converted map depends on that file too
+- [x] Module dunders: `__file__`, `__name__`, `__doc__`, `__package__`
 - [x] Builtins: `abs all any bool dict divmod enumerate float int len list max min
       print range repr reversed round set sorted str sum tuple zip`
 - [x] Three-valued conditions: an unresolvable `if` takes one branch and says so
@@ -343,7 +354,9 @@ equivalent are converted; the rest are reported (`LL2ODR-I902`)
       `TransverseMercatorProjector` → `<geoReference>` PROJ string
 - [x] `write()` / `writeRobust()` — accepted and ignored (we convert the map, not the file)
 - [ ] `load()` / `loadRobust()` — reported (`LL2ODR-E402`); the map exists only at runtime
-- [x] `MGRSProjector` — reproduced as UTM offset to the origin's 100 km square
+- [x] `MGRSProjector`, including `setMGRSCode("54SUE")` — the grid square is
+      decoded to its own south-west corner, which is Autoware's usual way of
+      georeferencing and needs no origin at all
 - [x] `GeocentricProjector` — the one projector whose coordinates are not a plan
       view, so the geometry is rotated onto the tangent plane at the map's own
       centroid and the header names that plane with `+proj=topocentric`

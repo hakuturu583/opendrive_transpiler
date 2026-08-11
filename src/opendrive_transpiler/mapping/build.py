@@ -35,8 +35,10 @@ from ..diagnostics import (
     W_BAD_SPEED_LIMIT,
     W_BOUNDS_DISAGREE,
     W_BOUNDS_SWAPPED,
+    W_DEGENERATE_LANELET,
     W_EMPTY_SUBTYPE,
     W_NEGATIVE_WIDTH,
+    W_PIVOT_REFERENCE,
     W_SHORT_ROAD,
     W_UNEQUAL_BOUND_ENDS,
     W_UNKNOWN_ROADMARK,
@@ -473,12 +475,20 @@ class _RoadBuilder:
             for group in chain.groups
         ]
 
+        self._report_pivot(chain, road_id)
+
         concatenated: list[Vec3] = []
         for piece in group_refs:
             concatenated.extend(piece if not concatenated else piece[1:])
         concatenated = dedupe(concatenated)
 
         if len(concatenated) < 2:
+            names = ", ".join(f"#{lanelets[i].lanelet2_id}" for i in chain.lanelet_indices)
+            self.bag.warn(
+                W_DEGENERATE_LANELET,
+                f"road {road_id} ({names}) has no boundary with any extent, so there is "
+                "no reference line to follow; dropped",
+            )
             return None
 
         geometries, reference = build_plan_view(
@@ -601,6 +611,44 @@ class _RoadBuilder:
                 return position + 1
         return None
 
+    def _report_pivot(self, chain: grouping.RoadChain, road_id: int) -> None:
+        """Say when the reference line had to move off the leftmost boundary.
+
+        It only moves for a corner pivot, and the move has a consequence worth
+        stating: the reference then runs along the lanelet's *right* edge, so the
+        lane sits to its left and is emitted as `+1`. Consumers read a left lane
+        as carrying traffic against `s`, which here it does not -- the geometry is
+        exact but that one convention cannot be honoured, because honouring it
+        would need a reference line along an edge that is a single point.
+        """
+        boundaries, _attributes, _owners = self.cross_section(chain.groups[0])
+        if self._first_extended(boundaries) == 0:
+            return
+        names = ", ".join(f"#{self.ir.lanelets[i].lanelet2_id}" for i in chain.lanelet_indices)
+        self.bag.warn(
+            W_PIVOT_REFERENCE,
+            f"road {road_id} ({names}) pivots on a corner, so its inner edge is a single "
+            "point and cannot be the reference line; the outer edge is used instead and "
+            "the lane is emitted to its left as +1, which reads as travelling against s",
+        )
+
+    @staticmethod
+    def _first_extended(boundaries: list[list[Vec3]]) -> int:
+        """The first boundary that actually goes somewhere.
+
+        A turn that pivots on a shared corner has a *single-point* inner bound --
+        stored as a `[corner, corner]` line string, which lanelet2 accepts and
+        which the tightest near-side turn of every intersection arm produces.
+        Taking that as the reference line gives a road of zero length, so the
+        reference moves along to a bound with a direction and the pivot becomes
+        the lane's far edge instead. The lane is then the pie slice between them,
+        which is the shape the input describes.
+        """
+        for index, bound in enumerate(boundaries):
+            if len(dedupe(bound)) >= 2:
+                return index
+        return 0
+
     def _group_reference(self, group: grouping.LaneGroup) -> list[Vec3]:
         """The polyline the planView follows for this cross-section."""
         boundaries, _attributes, _owners = self.cross_section(group)
@@ -614,7 +662,7 @@ class _RoadBuilder:
             # algorithm so a script that reads `lanelet.centerline` and the
             # emitted reference line agree.
             return centerline_coords(boundaries[0], boundaries[-1]) or boundaries[0]
-        return boundaries[0]
+        return boundaries[self._first_extended(boundaries)]
 
     def _center_index(
         self,
@@ -628,7 +676,9 @@ class _RoadBuilder:
             if forced is not None:
                 return forced
         if self.options.reference_line != "centerline":
-            return 0
+            # Lane 0 sits on whichever boundary the reference line follows, which
+            # is not boundary 0 when that one is a corner pivot.
+            return self._first_extended(boundaries)
         stations_ = sample_stations(reference, self.options.width_sample_step)
         offsets = [
             math.fsum(abs(t) for t in offsets_along(reference, stations_, bound))
