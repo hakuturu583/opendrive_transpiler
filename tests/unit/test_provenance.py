@@ -156,16 +156,20 @@ lanelet_map = createMapFromLanelets([A, B])
 """
 
 
-def test_a_cross_section_stacked_out_of_order_is_reported():
-    """The failure this exists to stop: widths measured between unrelated edges.
+def test_an_opposing_pair_is_stacked_left_to_right():
+    """Adjacency has no side, so the walk that collects members is not ordered.
 
-    Walking an opposing pair can order the members right-to-left instead of
-    left-to-right, and the resulting stack puts the shared bound at *both* edges
-    while dropping an outer one -- boundaries at y = 3.5, 0.0, 3.5, with y = 7
-    nowhere. The widths that come out of that mean nothing, so the one outcome
-    that must not happen is silence.
+    This arrangement used to come out stacked right-to-left, which put the shared
+    bound at *both* edges of the cross-section and dropped y = 7 entirely --
+    boundaries at y = 3.5, 0.0, 3.5. Ordering is now taken from geometry, so the
+    stack is y = 7, 3.5, 0 and both lanes get their real width.
     """
-    assert "LL2ODR-W507" in codes(convert(SHARED_RIGHT_BOUNDS))
+    result = convert(SHARED_RIGHT_BOUNDS)
+    assert "LL2ODR-W507" not in codes(result)
+    lanes = result.model.roads[0].lane_sections[0].lanes
+    assert len(lanes) == 2
+    for lane in lanes:
+        assert lane.constant_width == pytest.approx(3.5, abs=1e-6)
 
 
 # --------------------------------------------------------------------------
