@@ -242,6 +242,7 @@ things and the difference matters when planning around it.
 | Feature | Code | Why it is still open |
 |---|---|---|
 | `<spiral>` fitting | — | Not done. Fitting a clothoid to a polyline is a genuinely harder problem than arcs or cubics; `--fit=arc` and `--fit=parampoly3` cover the continuity case. |
+| `<border>` instead of `<width>` | — | **Measured and rejected.** It differs from cumulative `<width>` on 1 lane in 369 on the one real map available, and that lane is a defective cross-section. [Details below.](#considered-and-not-done-border-instead-of-width) |
 | `load()` / `loadRobust()` from an `.osm` | `LL2ODR-E402` | Not done, and it would change what this tool is: it converts maps a script *builds*, so reading one would mean adding an OSM parser and full inverse projections. |
 | Third-party modules other than `math`, including `random` | — | **Out of scope by choice.** Evaluating them means running them, which the design forbids; their calls yield `Unknown` and any branch on one is reported (`LL2ODR-W601`). |
 
@@ -614,9 +615,35 @@ point too tangled to build (`I901`), 6 belong to crosswalks, which become object
 rather than routable lanes, and 2 sit either side of a cross-section whose members
 share no boundary (`W507`).
 
-This found the defects fixed in #8, #9, #10 and #13, none of which any golden file
-could have caught — several of the shapes involved do not occur in any fixture,
-which is exactly why a real map is needed.
+This found the defects fixed in #8, #9, #10, #13 and #23, none of which any golden
+file could have caught — several of the shapes involved do not occur in any
+fixture, which is exactly why a real map is needed.
+
+### Considered and not done: `<border>` instead of `<width>`
+
+`<border>` states a lane's outer edge as an absolute `t(s)` rather than a width
+added to the lanes inside it, so it looks like the natural encoding for a format
+whose input *is* boundary polylines — and it would isolate each lane from its
+neighbours' fitting error.
+
+Measured on the Karlsruhe map, reconstructing every lane both ways through the
+same fitting machinery, it differs from cumulative `<width>` on **1 lane in 369**.
+That one lane turned out to be a cross-section whose bounds cross over, where
+`<width>` was wrong for a reason of its own — see `W703` below — and where an
+exact `<border>` would faithfully reproduce a self-intersecting polygon. Against
+that: `<border>` and `<width>` are mutually exclusive per lane, `<border>` is far
+less widely consumed, and `scenariogeneration` has no support for it at all.
+
+### `W703`: bounds that cross over
+
+OpenDRIVE has no negative `<width>`, so a lanelet whose outer bound crosses
+inside its inner one cannot be reproduced. Taking the magnitude — which this did
+— is the worst of the three available answers: the lane's outer edge lands as far
+*past* its inner edge as it should have fallen short, so twice the error, and
+`W703` could never fire because the value it tested had already been made
+positive. Widths are now signed by the direction the lane runs and clamped at
+zero. Three lanelets on the Karlsruhe map say so; the worst moves 1.31 m closer
+to its own bound.
 
 ## License
 
