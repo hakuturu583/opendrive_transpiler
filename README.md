@@ -33,17 +33,26 @@ The core only ever writes Python *text*, so it installs and runs anywhere.
 To try it without installing anything:
 
 ```bash
-uvx --from opendrive-transpiler opendrive-transpile my_map.py
+uvx --from opendrive-transpiler transpile_lanelet2 my_map.py --target xodr
 ```
 
 ## Use
 
-```bash
-# Generate the script (stdout by default)
-opendrive-transpile my_map.py -o my_map_xodr.py
+`--target` says what to produce. The command is installed under two names —
+`transpile_lanelet2` and `opendrive-transpile` — which are the same program.
 
-# Or go all the way to OpenDRIVE in one step
-opendrive-transpile my_map.py -o my_map_xodr.py --xodr my_map.xodr
+```bash
+# Straight to OpenDRIVE: writes my_map.xodr next to the input
+uv run transpile_lanelet2 my_map.py --target xodr
+
+# ...or somewhere specific
+uv run transpile_lanelet2 my_map.py --target xodr -o out/my_map.xodr
+
+# The generated Python instead, which is the default (stdout unless -o)
+uv run transpile_lanelet2 my_map.py -o my_map_xodr.py
+
+# Both: -o names the script, and the .xodr lands beside the input
+uv run transpile_lanelet2 my_map.py --target both -o my_map_xodr.py
 ```
 
 ```python
@@ -315,7 +324,8 @@ things and the difference matters when planning around it.
 - [x] Layers: `exists`, `get`, `__getitem__`, `__contains__`, `len`, iteration, `uniqueId`
 - [x] Layers: `search(bbox)`, `nearest(point, n)`, `findUsages` (structural, not spatial)
 
-**Regulatory elements** — all are parsed and recorded; none are converted yet (`LL2ODR-I902`)
+**Regulatory elements** — all are parsed and recorded. Those with an OpenDRIVE
+equivalent are converted; the rest are reported (`LL2ODR-I902`)
 
 - [x] `TrafficLight`, `RightOfWay`, `TrafficSign`, `SpeedLimit`, `AllWayStop`
 - [x] `LaneletWithStopLine`, `ConstLaneletWithStopLine`
@@ -406,6 +416,7 @@ machine-readable. Exit codes: `0` clean, `1` warnings under `--strict`,
 ### Options worth knowing
 
 ```bash
+--target {py,xodr,both}              # generated script (default), OpenDRIVE, or both
 --fit {line,arc,parampoly3}          # exact lines (default), arcs, or C1 cubics
 --reference-line {left-bound,centerline}
 --cubic-profiles                     # one cubic per width/elevation where it fits

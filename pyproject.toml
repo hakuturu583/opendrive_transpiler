@@ -60,6 +60,9 @@ Repository = "https://github.com/hakuturu583/opendrive_transpiler"
 Issues = "https://github.com/hakuturu583/opendrive_transpiler/issues"
 
 [project.scripts]
+# Two names for one entry point: `transpile_lanelet2` says what goes in,
+# `opendrive-transpile` says what comes out. Both are supported.
+transpile_lanelet2 = "opendrive_transpiler.cli:main"
 opendrive-transpile = "opendrive_transpiler.cli:main"
 
 [tool.hatch.build.targets.wheel]

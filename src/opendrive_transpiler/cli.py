@@ -24,9 +24,24 @@ EXIT_ERRORS = 2
 EXIT_USAGE = 3
 
 
+class _Parser(argparse.ArgumentParser):
+    """An ArgumentParser that exits with this tool's usage code.
+
+    argparse exits 2 on a bad argument, which here means "the conversion found
+    errors" -- so a typo in a flag was indistinguishable from a map that failed to
+    convert. Usage problems all exit `EXIT_USAGE` instead, whether argparse or
+    `TranspileOptions.validate` found them.
+    """
+
+    def error(self, message: str):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="opendrive-transpile",
+    parser = _Parser(
+        # No hardcoded prog: the same entry point is installed under two names, and
+        # the help should name whichever one was actually typed.
         description=(
             "Transpile a lanelet2 map-building Python script into a "
             "scenariogeneration script that produces the equivalent OpenDRIVE."
@@ -38,17 +53,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("input", type=Path, help="lanelet2 script to transpile")
     parser.add_argument(
+        "--target",
+        choices=["py", "xodr", "both"],
+        default="py",
+        help=(
+            "what to produce: the generated Python (default), the .xodr it builds, "
+            "or both. 'xodr' and 'both' run the generated script, which needs the "
+            "[emit] extra"
+        ),
+    )
+    parser.add_argument(
         "-o",
         "--output",
         type=str,
         default=None,
-        help="where to write the generated Python (default: stdout; '-' for stdout)",
+        help=(
+            "where to write the target. Defaults to stdout for --target=py and to "
+            "<input>.xodr for --target=xodr; '-' means stdout"
+        ),
     )
     parser.add_argument(
         "--xodr",
         type=Path,
         default=None,
-        help="also run the generated script and write this .xodr (needs the [emit] extra)",
+        help=(
+            "explicit path for the .xodr, which implies --target=both unless "
+            "--target says otherwise"
+        ),
     )
     parser.add_argument("--name", default=None, help="OpenDRIVE map name (default: input stem)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -198,6 +229,20 @@ def report(result: TranspileResult, args: argparse.Namespace, stream) -> None:
         print(f"{result.source_name}: {result.stats.describe()}", file=stream)
 
 
+def _xodr_path(args, target: str) -> Path:
+    """Where the `.xodr` goes.
+
+    An explicit `--xodr` wins. Otherwise `-o` names it, but only when the .xodr is
+    the sole target -- under `--target both` that path belongs to the script, and
+    the .xodr sits beside the input instead.
+    """
+    if args.xodr is not None:
+        return args.xodr
+    if target == "xodr" and args.output and args.output != "-":
+        return Path(args.output)
+    return args.input.with_suffix(".xodr")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -217,21 +262,27 @@ def main(argv: list[str] | None = None) -> int:
     if not result.ok:
         return EXIT_ERRORS
 
-    destination = args.output or "-"
-    if destination == "-":
-        sys.stdout.write(result.code)
-    else:
-        path = Path(destination)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(result.code, encoding="utf-8")
-        if not args.quiet:
-            print(f"wrote {path}", file=sys.stderr)
+    target = args.target
+    # Naming an .xodr path is a request for one, whatever the default target is.
+    if args.xodr is not None and target == "py":
+        target = "both"
 
-    if args.xodr is not None:
+    if target in ("py", "both"):
+        destination = args.output or "-"
+        if destination == "-":
+            sys.stdout.write(result.code)
+        else:
+            path = Path(destination)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(result.code, encoding="utf-8")
+            if not args.quiet:
+                print(f"wrote {path}", file=sys.stderr)
+
+    if target in ("xodr", "both"):
         from .runner import EmitDependencyMissing, run_generated
 
         try:
-            written = run_generated(result.code, args.xodr)
+            written = run_generated(result.code, _xodr_path(args, target))
         except EmitDependencyMissing as exc:
             print(f"error: {exc}", file=sys.stderr)
             return EXIT_ERRORS
