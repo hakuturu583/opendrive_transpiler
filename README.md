@@ -152,9 +152,25 @@ passes through vertices, which is why it is not the default.
 **By default the planView is one `<line>` per polyline segment.** Every vertex
 lands on its input coordinate — a round-trip test reads the `.xodr` back and
 asserts agreement to under 1e-9 m. The cost is that the heading is discontinuous
-at each vertex (C0, not C1). `--fit=arc` and `--fit=parampoly3` buy curvature
-continuity for up to `chord_tolerance` of positional error; that trade is opt-in
-because exactness is the more defensible default for an HD map.
+at each vertex (C0, not C1). `--fit=arc` and `--fit=parampoly3` trade that
+exactness for continuity, and are opt-in because exactness is the more defensible
+default for an HD map. Measured over every road of the Karlsruhe map:
+
+| fit | records | worst stray from the polyline | heading jumps at joins | curvature jumps |
+|---|---|---|---|---|
+| `line` (default) | 440 | **1.1e-13 m** | 330 / 330 | 0 / 330 |
+| `arc` | 327 | 0.0995 m | 217 / 217 | 108 / 217 |
+| `parampoly3` | 440 | 4.32 m | **0 / 330** | 330 / 330 |
+
+So `parampoly3` is the one that actually buys G1; `arc` gives continuous
+curvature *within* a run but still turns a corner at each join. None of them is
+G2, which is what a `<spiral>` would be for — see the not-done table.
+
+`arc` may bulge up to `ARC_SAGITTA` (100 mm) off the polyline *between* two input
+vertices, which is a looser bound than `chord_tolerance` on purpose: arc fitting
+is only meaningful if the vertices are read as *samples* of a curve, and held to
+sub-millimetre it fires once on the whole map. Held to nothing, which is what it
+used to be, it strayed 19 m.
 
 **Chains of lanelets become one road with many lane sections**, and the lane
 *count* may change between them: a lane drop is a lane section change, not a new
@@ -241,7 +257,7 @@ things and the difference matters when planning around it.
 
 | Feature | Code | Why it is still open |
 |---|---|---|
-| `<spiral>` fitting | — | Not done. Fitting a clothoid to a polyline is a genuinely harder problem than arcs or cubics; `--fit=arc` and `--fit=parampoly3` cover the continuity case. |
+| `<spiral>` fitting | — | Not done, and **measured as not worth it**. A clothoid can only buy G2, since `--fit=parampoly3` already delivers G1 and the default is positionally exact (1.1e-13 m) so nothing can improve on it. lanelet2 input is a polyline and carries no curvature at all, so fitting one invents curvature the source never had — the same objection that keeps cubic width profiles behind a flag. Needs iterative Fresnel inversion. |
 | `<border>` instead of `<width>` | — | **Measured and rejected.** It differs from cumulative `<width>` on 1 lane in 369 on the one real map available, and that lane is a defective cross-section. [Details below.](#considered-and-not-done-border-instead-of-width) |
 | `load()` / `loadRobust()` from an `.osm` | `LL2ODR-E402` | Not done, and it would change what this tool is: it converts maps a script *builds*, so reading one would mean adding an OSM parser and full inverse projections. |
 | Third-party modules other than `math`, including `random` | — | **Out of scope by choice.** Evaluating them means running them, which the design forbids; their calls yield `Unknown` and any branch on one is reported (`LL2ODR-W601`). |

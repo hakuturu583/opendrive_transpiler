@@ -136,8 +136,32 @@ def _circumcircle(a: Vec2, b: Vec2, c: Vec2) -> tuple[float, float, float] | Non
     return ux, uy, math.hypot(ax - ux, ay - uy)
 
 
+ARC_SAGITTA = 0.1
+"""Metres an `<arc>` may bulge off the polyline *between* two input vertices.
+
+Arc fitting only makes sense under the reading that the vertices *sample* a
+curve, so recovering that curve is the point and the chord between two samples
+is the discretisation error rather than the truth. Held to `chord_tolerance`
+instead -- sub-millimetre, the scale at which a vertex may be moved -- an arc
+could essentially never fire: a quarter circle of radius 38 m sampled every 7.5
+degrees, which is the `curved_road` fixture, already leaves its own chords by 81
+mm. One arc survived on the whole Lanelet2 Karlsruhe example.
+
+But the reading needs a bound, or it licenses anything. Unbounded, `_fit_arc`
+recovered a circle of radius 21.8 m swept 171 degrees from three points -- 65 m
+of arc across a 43 m gap, bulging 19 m off the road -- because three points lie
+exactly on their own circumcircle whatever happens between them, so the
+vertex-by-vertex check could not see it. 85 of 251 records strayed over 100 mm.
+
+100 mm is below the survey noise of the maps this reads and narrower than a lane
+marking, and it admits 46 arcs on that map while holding the worst stray to 125
+mm. A caller who raises `--chord-tolerance` above it has asked for more slack and
+gets it.
+"""
+
+
 def _fit_arc(
-    pts: Sequence[Vec3], start: int, stop: int, chord_tolerance: float
+    pts: Sequence[Vec3], start: int, stop: int, chord_tolerance: float, sagitta: float
 ) -> tuple[float, float, float] | None:
     """Fit a circular arc through `pts[start..stop]`.
 
@@ -171,7 +195,11 @@ def _fit_arc(
         return delta % (2.0 * math.pi)
 
     # Every vertex must lie on the circle and progress monotonically along it,
-    # or this run is not a single arc.
+    # or this run is not a single arc. Vertices alone are not enough, though:
+    # three points lie exactly on their own circumcircle whatever the arc does
+    # between them, so the run has to be checked *between* the samples too --
+    # `sagitta` is how far it may bulge there. See ARC_SAGITTA for why that is a
+    # separate, looser bound than the one the vertices themselves are held to.
     previous = 0.0
     for index in range(start + 1, stop + 1):
         point = pts[index]
@@ -179,6 +207,8 @@ def _fit_arc(
             return None
         advance = swept(point)
         if advance <= previous:
+            return None
+        if radius * (1.0 - math.cos((advance - previous) / 2.0)) > sagitta:
             return None
         previous = advance
 
@@ -197,15 +227,20 @@ def arc_geometries(
     *,
     chord_tolerance: float = 1e-4,
     min_curvature: float = 1e-8,
+    sagitta: float | None = None,
 ) -> list[GeometryRecord]:
     """Greedy arc fitting: longest arc-or-line run at each step.
 
     Unlike `line_geometries`, this trades exactness for curvature continuity
     within each run -- vertices may sit up to `chord_tolerance` off the emitted
-    curve. Straight runs still come out as `<line>`, and a run that is not
-    arc-like falls back to one line per segment, so the result is never worse
-    than the default strategy.
+    curve, and the curve *between* two vertices up to `sagitta` off the segment
+    joining them (`ARC_SAGITTA`, or `chord_tolerance` where that is looser).
+    Straight runs still come out as `<line>`, and a run that is not arc-like
+    falls back to one line per segment -- so the *fitting* never does worse than
+    the default, though the emitted curve is of course further from the input
+    polyline than the default's zero.
     """
+    limit = max(ARC_SAGITTA, chord_tolerance) if sagitta is None else sagitta
     pts = dedupe(points)
     if len(pts) < 2:
         return []
@@ -222,7 +257,7 @@ def arc_geometries(
             if _run_is_straight(pts, index, stop, math.inf, chord_tolerance):
                 best_stop, best = stop, ("line", 0.0, 0.0, 0.0)
                 continue
-            fitted = _fit_arc(pts, index, stop, chord_tolerance)
+            fitted = _fit_arc(pts, index, stop, chord_tolerance, limit)
             if fitted is None:
                 break
             curvature, length, heading_ = fitted
