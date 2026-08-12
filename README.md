@@ -618,6 +618,7 @@ On the Lanelet2 Karlsruhe example map (`lanelet2_maps/res/mapping_example.osm`,
 | lanes within 0.1 m | 256 / 362 |
 | successions stated in the file | 310 / 327 |
 | links asserted with no succession behind them | 0 |
+| stated joins whose two ends actually meet | 93 / 127 |
 
 Those 242 are exact to the limit of the check: the smallest deviation it can
 measure is the 48 µm projection offset itself, and that is what they sit at. The
@@ -630,6 +631,34 @@ The remaining gaps are reported by the run itself: 7 successions cross a branch
 point too tangled to build (`I901`), 6 belong to crosswalks, which become objects
 rather than routable lanes, and 2 sit either side of a cross-section whose members
 share no boundary (`W507`).
+
+### `W512`: linked roads that do not meet
+
+Stating a link and *meeting* at it are separate claims, and for a long time only
+the first was measured — which is how 34 joins up to 12.5 m apart sat behind that
+clean connectivity score until someone drew the map and looked at it. OpenDRIVE
+expects a road and its successor, and an incoming road and the connecting road it
+enters a junction by, to be geometrically contiguous.
+
+The cause is the reference line at the top of this file: it is the **leftmost
+boundary of the cross-section**, so where the cross-section changes lane count
+across a join, the leftmost boundary is a different physical line on either side
+and the two ends sit a few lane widths apart. The correlation is exact:
+
+| lanes gained or lost across the join | joins | median gap | worst |
+|---|---|---|---|
+| none | 45 | **0.000 m** | **0.000 m** |
+| one | 27 | 0.000 m | 5.54 m |
+| two | 10 | 3.44 m | 10.53 m |
+| three | 3 | 9.25 m | 12.52 m |
+
+Every join that keeps its lane count is exact. `--reference-line=centerline` and
+`=auto` are both *worse* (68 and 60 exact of 127, against 93).
+
+It is reported rather than repaired, because closing it means either
+synthesising a stretch of reference line that is not in the input or choosing the
+reference boundary across a whole chain at once — both larger decisions than a
+warning, and both giving up something the default exists to protect.
 
 This found the defects fixed in #8, #9, #10, #13 and #23, none of which any golden
 file could have caught — several of the shapes involved do not occur in any

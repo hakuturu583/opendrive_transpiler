@@ -41,6 +41,7 @@ from ..diagnostics import (
     W_DEGENERATE_LANELET,
     W_EMPTY_SUBTYPE,
     W_LANE_ABSENT,
+    W_LINK_NOT_CONTIGUOUS,
     W_NEGATIVE_WIDTH,
     W_PIVOT_REFERENCE,
     W_SHORT_ROAD,
@@ -240,6 +241,7 @@ def build_model(
         stats.junctions = len(model.junctions)
 
     _link_roads(network, rels, roads, ir, bag)
+    _report_discontinuities(model, roads, builder._references, bag, options)
 
     _attach_furniture(builder, roads, ir, crosswalks, options)
 
@@ -1377,6 +1379,107 @@ class _RoadBuilder:
         if len(ids) == 1:
             return f"lanelet_{ids[0]}"
         return f"lanelets_{ids[0]}_{ids[-1]}"
+
+
+CONTIGUITY_TOLERANCE = 1e-3
+"""Metres two linked road ends may be apart before it is worth reporting.
+
+The same tolerance node identity is decided by, because that is what makes two
+ends the same end: where a succession really is a shared pair of boundary nodes
+and both roads follow a boundary through them, the gap comes out at exactly zero
+rather than merely small.
+"""
+
+
+def _endpoints(reference: list[Vec3]) -> tuple[Vec3, Vec3]:
+    return reference[0], reference[-1]
+
+
+def _contact_point(reference: list[Vec3], contact: str | None) -> Vec3:
+    start, end = _endpoints(reference)
+    return end if contact == "end" else start
+
+
+def _report_discontinuities(
+    model: OdrModel,
+    roads: list[RoadSpec | None],
+    references: dict[int, list[Vec3]],
+    bag: DiagnosticBag,
+    options: TranspileOptions,
+) -> None:
+    """Say where two roads the file links do not actually meet.
+
+    OpenDRIVE expects a road and its successor -- and an incoming road and the
+    connecting road it enters a junction by -- to be geometrically contiguous:
+    a consumer that drives off the end of one is on the start of the other. This
+    checks that the two contact points coincide, which nothing else does. Stating
+    the link and meeting at it are separate claims, and the connectivity figures
+    in the README only ever measured the first.
+
+    They come apart because of the reference line this emits. It is the *leftmost
+    boundary of the cross-section*, so where the cross-section changes lane count
+    across the join, the leftmost boundary is a different physical line on either
+    side and the two ends sit a few lane widths apart. On the Lanelet2 Karlsruhe
+    example every one of the 45 joins that keeps its lane count is exact, and
+    every one of the 34 gaps is a join that does not -- up to 12.5 m where three
+    lanes end at once.
+
+    Reported rather than repaired: closing it means either synthesising a stretch
+    of reference line that is not in the input, or choosing the reference boundary
+    across a whole chain at once, and both are larger decisions than a warning.
+    """
+    by_id = {road.road_id: road for road in roads if road is not None}
+
+    def gap(road_id: int, contact: str | None, other_id: int, other_contact: str | None):
+        here, there = references.get(road_id), references.get(other_id)
+        if not here or not there:
+            return None
+        a = _contact_point(here, contact)
+        b = _contact_point(there, other_contact)
+        distance = math.dist((a[0], a[1]), (b[0], b[1]))
+        return distance if distance > CONTIGUITY_TOLERANCE else None
+
+    seen: set[tuple[int, int, str]] = set()
+
+    def report(road_id: int, other_id: int, contact: str, distance: float, how: str) -> None:
+        key = (min(road_id, other_id), max(road_id, other_id), contact)
+        if key in seen:
+            return
+        seen.add(key)
+        bag.warn(
+            W_LINK_NOT_CONTIGUOUS,
+            f"road {road_id} and road {other_id} are linked {how} but their reference lines "
+            f"are {distance:.3g} m apart where they meet; the cross-section changes across "
+            "the join, so each road follows a different boundary",
+        )
+
+    for road in by_id.values():
+        for link, own in ((road.predecessor, "start"), (road.successor, "end")):
+            if link is None or link.element_type != "road" or link.element_id not in by_id:
+                continue
+            distance = gap(road.road_id, own, link.element_id, link.contact_point)
+            if distance is not None:
+                report(road.road_id, link.element_id, own, distance, "end to end")
+
+    if not options.junctions:
+        return
+
+    for junction in model.junctions:
+        for connection in junction.connections:
+            incoming, connecting = connection.incoming_road, connection.connecting_road
+            if incoming not in by_id or connecting not in by_id:
+                continue
+            entering = by_id[incoming]
+            side = None
+            for link, own in ((entering.predecessor, "start"), (entering.successor, "end")):
+                if link is not None and link.element_type == "junction":
+                    side = own
+            if side is None:
+                continue
+            distance = gap(incoming, side, connecting, connection.contact_point)
+            if distance is not None:
+                how = f"through junction {junction.junction_id}"
+                report(incoming, connecting, side, distance, how)
 
 
 def _link_roads(
