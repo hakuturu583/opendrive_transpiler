@@ -26,6 +26,7 @@ from typing import NamedTuple
 from ..config import TranspileOptions
 from ..diagnostics import (
     I_AREA_SKIPPED,
+    I_CONTIGUOUS_AVAILABLE,
     I_CROSSWALK_OBJECT,
     I_GEO_REFERENCE,
     I_JUNCTION_SKIPPED,
@@ -78,7 +79,7 @@ from ..odr.model import (
     RoadSpec,
     TranspileStats,
 )
-from ..topology import grouping, relations
+from ..topology import contiguity, grouping, relations
 from ..topology.index import NodeIndex
 from . import furniture, junctions, localise, tables
 
@@ -242,6 +243,7 @@ def build_model(
 
     _link_roads(network, rels, roads, ir, bag)
     _report_discontinuities(model, roads, builder._references, bag, options)
+    _report_reference_contiguity(builder, network, rels, bag, options)
 
     _attach_furniture(builder, roads, ir, crosswalks, options)
 
@@ -569,6 +571,7 @@ class _RoadBuilder:
         self._swap_reported: set[int] = set()
         self._unshared_reported: set[tuple[int, int]] = set()
         self._references: dict[int, list[Vec3]] = {}
+        self._cross_sections: dict[int, tuple] = {}
 
     # -- orientation -------------------------------------------------------
     def oriented_bounds(self, lanelet: LaneletIR) -> OrientedBounds:
@@ -721,6 +724,9 @@ class _RoadBuilder:
     ) -> tuple[list[list[Vec3]], list[dict[str, str]], list[LaneletIR]]:
         """A lane group as an ordered left-to-right stack of boundaries.
 
+        Memoised, because six places want it and the checks it makes on the way
+        are worth reporting once per group rather than once per caller.
+
         For members `m0..mn` the boundaries are `m0.left, m0.right, m1.right, …`,
         so lane `k` lies between boundary `k` and `k+1` and belongs to `m_k`.
         Expressing a cross-section this way is what lets the reference line sit
@@ -733,6 +739,10 @@ class _RoadBuilder:
         each join is checked by node identity, and a member whose edges turn out
         to be mirrored is turned round rather than stacked from the wrong sides.
         """
+        cached = self._cross_sections.get(id(group))
+        if cached is not None:
+            return cached
+
         lanelets = self.ir.lanelets
         boundaries: list[list[Vec3]] = []
         attributes: list[dict[str, str]] = []
@@ -771,7 +781,9 @@ class _RoadBuilder:
             owners.append(lanelet)
             previous_key = right_key
 
-        return boundaries, attributes, owners
+        result = (boundaries, attributes, owners)
+        self._cross_sections[id(group)] = result
+        return result
 
     def _report_unshared(self, previous: int, member: int) -> None:
         """Say when two lanelets placed side by side share no boundary at all.
@@ -1480,6 +1492,100 @@ def _report_discontinuities(
             if distance is not None:
                 how = f"through junction {junction.junction_id}"
                 report(incoming, connecting, side, distance, how)
+
+
+def _reference_graph(
+    builder: _RoadBuilder,
+    network: grouping.Network,
+    rels: relations.Relations,
+    tolerance: float,
+) -> tuple[list[list[contiguity.Corner | None]], list[list[contiguity.Corner | None]], list]:
+    """Every cross-section's end and start corners, and the handovers between them.
+
+    Two kinds of handover, solved together because they constrain each other: the
+    seam between consecutive groups of one road, and the join between the last
+    group of one road and the first group of the next.
+    """
+    index_of = {id(group): i for i, group in enumerate(network.groups)}
+    ends: list[list[contiguity.Corner | None]] = []
+    starts: list[list[contiguity.Corner | None]] = []
+    for group in network.groups:
+        stack, _attributes, _owners = builder.cross_section(group)
+        ends.append(contiguity.corners_of(stack, "end", tolerance))
+        starts.append(contiguity.corners_of(stack, "start", tolerance))
+
+    edges: list[contiguity.Edge] = []
+    for chain in network.chains:
+        for before, after in pairwise(chain.groups):
+            edges.append(
+                contiguity.Edge(index_of[id(before)], index_of[id(after)], within_road=True)
+            )
+
+    heads = {id(chain.groups[0]) for chain in network.chains if chain.groups}
+    for chain in network.chains:
+        if not chain.groups:
+            continue
+        last = chain.groups[-1]
+        for member in last.members:
+            for following in rels.successor_of(member):
+                target = network.group_of.get(following)
+                if target is None:
+                    continue
+                group = network.groups[target]
+                if id(group) not in heads or group is last:
+                    continue
+                edge = contiguity.Edge(index_of[id(last)], target, within_road=False)
+                if edge not in edges:
+                    edges.append(edge)
+    return ends, starts, edges
+
+
+def _report_reference_contiguity(
+    builder: _RoadBuilder,
+    network: grouping.Network,
+    rels: relations.Relations,
+    bag: DiagnosticBag,
+    options: TranspileOptions,
+) -> None:
+    """Say whether the reference lines *could* be made to meet, and what it would cost.
+
+    `W512` reports each join that does not meet. This answers the question that
+    follows from it, once, in numbers rather than by argument: how many of them a
+    network-wide choice of reference boundary could close, and how many roads
+    would have to give up their leftmost boundary to do it.
+
+    Nothing is changed. The cost is the point of reporting it -- a reference line
+    inside the cross-section puts the lanes left of it on positive ids, which
+    under right-hand traffic reads as travelling against `s`, so this is not a
+    trade to make silently.
+    """
+    ends, starts, edges = _reference_graph(builder, network, rels, options.point_tolerance)
+    if not edges:
+        return
+
+    default = sum(
+        1
+        for edge in edges
+        if ends[edge.left] and starts[edge.right] and ends[edge.left][0] == starts[edge.right][0]
+    )
+    if default == len(edges):
+        return
+
+    solved = contiguity.solve(ends, starts, edges)
+    if solved.met <= default:
+        return
+
+    # Boundary index k means k boundaries sit to its left, so k lanes move to
+    # positive ids. Counting the whole cross-section would overstate it.
+    lanes = sum(solved.chosen[i] for i in solved.interior)
+    bag.info(
+        I_CONTIGUOUS_AVAILABLE,
+        f"{len(edges) - default} of {len(edges)} reference-line handovers do not meet; "
+        f"choosing the reference boundary across the network instead of per road would "
+        f"close {solved.met - default} of them, at the cost of {len(solved.interior)} "
+        f"cross-section(s) moving off their leftmost boundary and {lanes} lane(s) "
+        "changing side",
+    )
 
 
 def _link_roads(

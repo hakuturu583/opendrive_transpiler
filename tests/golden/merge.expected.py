@@ -3,8 +3,9 @@
 source:  tests/fixtures/merge.py
 sha256:  8b8841b60d68d42037e48959b43f605106dbb0209317863860b5f799f95f42cc
 summary: 4/4 lanelets converted, 3 roads, 4 lanes
-notices: 1 warning(s)
+notices: 1 warning(s), 1 info(s)
     LL2ODR-W512: road 1 and road 3 are linked through junction 1 but their reference lines are 3 m apart where they meet; the cross-section changes across the join, so each road follows a different boundary
+    LL2ODR-I911: 1 of 2 reference-line handovers do not meet; choosing the reference boundary across the network instead of per road would close 1 of them, at the cost of 2 cross-section(s) moving off their leftmost boundary and 2 lane(s) changing side
 
 Run this file to write merge.xodr. Requires scenariogeneration:
     pip install "opendrive-transpiler[emit]"

@@ -655,10 +655,29 @@ and the two ends sit a few lane widths apart. The correlation is exact:
 Every join that keeps its lane count is exact. `--reference-line=centerline` and
 `=auto` are both *worse* (68 and 60 exact of 127, against 93).
 
-It is reported rather than repaired, because closing it means either
-synthesising a stretch of reference line that is not in the input or choosing the
-reference boundary across a whole chain at once — both larger decisions than a
-warning, and both giving up something the default exists to protect.
+It is reported rather than repaired. `I911` says once per run what repairing
+it would take, measured rather than argued:
+
+```
+25 of 223 reference-line handovers do not meet; choosing the reference boundary
+across the network instead of per road would close 17 of them, at the cost of 65
+cross-section(s) moving off their leftmost boundary and 72 lane(s) changing side
+```
+
+Two things make it expensive. Synthesising a connector is *not* one of the
+options — 25 of the 34 gaps are lateral rather than along-track (median 3.20 m
+across against 0.45 m along), so no stretch of road is missing and a connector
+would run sideways across the carriageway. What can continue across a join is the
+**corner node**, not the boundary: a succession is two line strings meeting at a
+corner, so the fix is to choose which boundary of each cross-section carries the
+reference line. `topology/contiguity.py` computes that assignment.
+
+And the cost propagates. At a join that does not already meet, one side must give
+up its leftmost boundary — if both kept it and their corners agreed, the join
+would meet already — and moving one cross-section forces the next one along the
+chain to move with it. A reference line inside the cross-section puts the lanes
+left of it on positive ids, which under right-hand traffic reads as travelling
+against `s`.
 
 This found the defects fixed in #8, #9, #10, #13 and #23, none of which any golden
 file could have caught — several of the shapes involved do not occur in any
