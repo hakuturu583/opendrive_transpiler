@@ -16,7 +16,7 @@ parsed with ElementTree, projected with pyproj using the `.xodr`'s own
 spec. That separation is the whole point: a checker built on the code under test
 cancels its own bugs out and reports a clean bill of health.
 
-Three questions, and the third is the one a router cares about:
+Four questions, and the last two are the ones a router cares about:
 
 `geometry`
     Each emitted lane's two boundaries against the two bounds of the lanelet it
@@ -34,6 +34,13 @@ Three questions, and the third is the one a router cares about:
     `.xodr` states, in both directions. A link the file asserts with no succession
     behind it is worse than a missing one: it reads as connectivity that is not
     there.
+
+`contiguity`
+    Whether the roads the file links actually *meet*. Stating a link and meeting
+    at it are separate claims, and for a long time only the first was measured --
+    which is how 34 joins up to 12.5 m apart sat behind a clean connectivity
+    score. A consumer driving off the end of one road has to be on the start of
+    the next.
 
 Provenance comes from the `<userData code="lanelet2_id">` records the transpiler
 emits per lane. That is the only thing taken from the conversion, it is
@@ -701,6 +708,73 @@ def check_connectivity(osm: Osm, xodr: Xodr, xy, lane_of, show: int) -> None:
     print(f"\n  links the .xodr states with no succession behind them: {len(invented)}")
     for a, b, first, second in invented[:show]:
         print(f"    {a} <-> {b}   {first} <-> {second}")
+
+    check_contiguity(xodr, show)
+
+
+def check_contiguity(xodr: Xodr, show: int) -> None:
+    """Do the roads the file links actually meet?
+
+    Stating a link and meeting at it are separate claims, and everything above
+    only ever measured the first. OpenDRIVE expects a road and its successor --
+    and an incoming road and the connecting road it enters a junction by -- to be
+    geometrically contiguous, so that driving off the end of one puts you on the
+    start of the other.
+
+    Which end of a road touches a junction is read from the road's own
+    `<link><successor elementType="junction">`, never from a section index: a road
+    with one section has first == last, and an index cannot tell its ends apart.
+    Getting that wrong reported a median gap of 3.4 m on a map whose median is 0.
+    """
+    print("\n== do the linked roads meet ==")
+
+    def contact(road: Road, where: str | None) -> tuple[float, float]:
+        x, y, _hdg = road.reference_at(0.0 if where == "start" else road.length)
+        return x, y
+
+    rows: list[tuple] = []
+    for road in xodr.roads:
+        for link, own in ((road.predecessor, "start"), (road.successor, "end")):
+            if link is None or link[0] != "road" or link[1] not in xodr.by_id:
+                continue
+            other = xodr.by_id[link[1]]
+            gap = math.dist(contact(road, own), contact(other, link[2] or "start"))
+            rows.append((gap, road.id, other.id, "road to road"))
+
+    for junction_id, connections in xodr.junctions.items():
+        for connection in connections:
+            incoming, connecting = connection["incoming"], connection["connecting"]
+            if incoming not in xodr.by_id or connecting not in xodr.by_id:
+                continue
+            entering = xodr.by_id[incoming]
+            side = next(
+                (
+                    own
+                    for link, own in ((entering.successor, "end"), (entering.predecessor, "start"))
+                    if link is not None and link[0] == "junction" and link[1] == junction_id
+                ),
+                None,
+            )
+            if side is None:
+                continue
+            gap = math.dist(
+                contact(entering, side), contact(xodr.by_id[connecting], connection["contact"])
+            )
+            rows.append((gap, incoming, connecting, f"junction {junction_id}"))
+
+    if not rows:
+        print("  nothing links")
+        return
+
+    gaps = sorted(row[0] for row in rows)
+    apart = [row for row in rows if row[0] > 1e-3]
+    print(f"  {len(rows)} stated joins: {len(rows) - len(apart)} meet exactly, {len(apart)} do not")
+    print(
+        f"  median {percentile(gaps, 0.5):.4f}   p90 {percentile(gaps, 0.90):.3f}"
+        f"   max {gaps[-1]:.3f} m"
+    )
+    for gap, a, b, how in sorted(apart, reverse=True)[:show]:
+        print(f"    {gap:8.3f} m   road {a:>4} -> {b:<4}  {how}")
 
 
 def main() -> int:
